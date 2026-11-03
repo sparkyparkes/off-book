@@ -7,12 +7,12 @@
 // Leave it empty to use Off Book without sign-in (data stays on each device).
 // ─────────────────────────────────────────────────────────────────────────────
 const firebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
+  apiKey: "AIzaSyDuEDnG0s6Y8r2tZ_4SSfGkmyKLNzEex4I",
+  authDomain: "off-book-4ea37.firebaseapp.com",
+  projectId: "off-book-4ea37",
+  storageBucket: "off-book-4ea37.firebasestorage.app",
+  messagingSenderId: "803626580556",
+  appId: "1:803626580556:web:d7f7be56c639a4ede7d2e9"
 };
 
 export default firebaseConfig;
