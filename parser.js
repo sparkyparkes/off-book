@@ -85,12 +85,33 @@ export function parseScript(rawLines) {
 
   let speaker = null; // currently open dialogue speaker (caps style)
   let current = null; // current line entry being built
+  let lastLine = null; // the speech that just ended at a blank line (may continue as the next stanza of a song)
 
   const endLine = () => { speaker = null; current = null; };
+  const newLine = (who, text, x) => { lastLine = null; current = { type: 'line', speaker: who, text: '', _rows: [], scene }; addRow(text, x); entries.push(current); return current; };
+  const addRow = (text, x) => { const t = cleanDialogue(text); if (t) current._rows.push({ t, x }); };
+
+  // Songs & poems: after a blank line, a following verse-like paragraph continues the same speech as a new stanza
+  const continuesStanza = (i, t, x) => {
+    if (!lastLine || entries[entries.length - 1] !== lastLine || !isVerseRows(lastLine._rows)) return false;
+    if (/^[\[(]/.test(t)) return false;
+    const para = [];
+    for (let k = i; k < lines.length && !lines[k].blank; k++) para.push(lines[k]);
+    const ok = para.every(p => p.text.length <= 70 && !SCENE_RE.test(p.text) && !isCapsName(p.text) && !/^[\[(]/.test(p.text));
+    const caps = para.filter(p => STARTS_CAP.test(p.text)).length / para.length;
+    const lastX = lastLine._rows[lastLine._rows.length - 1]?.x;
+    const sameIndent = typeof x === 'number' && typeof lastX === 'number' && Math.abs(x - lastX) <= 15;
+    return ok && caps >= 0.6 && (para.length >= 2 || (style === 'caps' && sameIndent));
+  };
+  const resumeStanza = (t, x) => {
+    current = lastLine; speaker = lastLine.speaker; lastLine = null;
+    current._rows.push({ stanza: true });
+    addRow(t, x);
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
-    if (l.blank) { endLine(); closeDir(); continue; }
+    if (l.blank) { if (current) lastLine = current; endLine(); closeDir(); continue; }
     const t = l.text;
 
     if (SCENE_RE.test(t) && t.length < 120) { endLine(); closeDir(); pushScene(t); continue; }
@@ -101,19 +122,19 @@ export function parseScript(rawLines) {
       if (m && (style === 'colon' ? isSpeakerTag(m[1]) : isCapsName(m[1]))) {
         closeDir();
         const body = (style === 'colon' ? m[3] : m[2]) || '';
-        current = { type: 'line', speaker: normalizeName(m[1]), text: cleanDialogue(body), scene };
+        newLine(normalizeName(m[1]), body, l.x);
         if (style === 'colon' && m[2]) current.note = m[2];
-        entries.push(current);
         speaker = current.speaker;
         continue;
       }
       if (current && !/^\(.*\)$/.test(t)) {
         // Continuation of dialogue unless it looks like a stage direction in brackets
         if (/^[\[(]/.test(t) && /[\])]$/.test(t)) { pushDir(t.replace(/^[\[(]|[\])]$/g, '')); closeDir(); continue; }
-        current.text = (current.text + ' ' + cleanDialogue(t)).trim();
+        addRow(t, l.x);
         continue;
       }
-      endLine();
+      if (!current && continuesStanza(i, t, l.x)) { resumeStanza(t, l.x); continue; }
+      endLine(); lastLine = null;
       pushDir(t.replace(/^[\[(]|[\])]$/g, ''));
       continue;
     }
@@ -125,29 +146,65 @@ export function parseScript(rawLines) {
       if (next && !next.blank && !isCapsName(next.text)) {
         closeDir();
         speaker = normalizeName(t);
-        current = null;
+        current = null; lastLine = null;
         continue;
       }
     }
     if (speaker) {
-      if (/^\(.*\)$/.test(t)) { if (current) current.text += ' '; continue; } // parenthetical
-      if (!current) { current = { type: 'line', speaker, text: cleanDialogue(t), scene }; entries.push(current); }
-      else current.text = (current.text + ' ' + cleanDialogue(t)).trim();
+      if (/^\(.*\)$/.test(t)) continue; // parenthetical like (beat)
+      if (!current) newLine(speaker, t, l.x);
+      else addRow(t, l.x);
       continue;
     }
+    if (continuesStanza(i, t, l.x)) { resumeStanza(t, l.x); continue; }
+    lastLine = null;
     pushDir(t);
   }
 
   return finalize(entries, scenes);
 }
 
+const STARTS_CAP = /^["'“‘(¿¡]?[A-Z0-9]/;
+
+// Does this speech look like verse (song lyrics, poetry) rather than wrapped prose?
+// Prose wraps fill the line almost to the edge; verse lines are uneven and usually start with a capital.
+export function isVerseRows(rows) {
+  const real = rows.filter(r => !r.stanza);
+  if (real.length < 2) return false;
+  const stanzas = rows.some(r => r.stanza);
+  const maxLen = Math.max(...real.map(r => r.t.length));
+  const nonFinal = rows.filter((r, i) => !r.stanza && rows[i + 1] && !rows[i + 1].stanza);
+  const shortRatio = nonFinal.length ? nonFinal.filter(r => r.t.length < maxLen * 0.85).length / nonFinal.length : 1;
+  const capRatio = real.slice(1).filter(r => STARTS_CAP.test(r.t)).length / (real.length - 1);
+  return (shortRatio >= 0.5 && capRatio >= 0.6) || (real.length >= 3 && capRatio >= 0.75) || (stanzas && capRatio >= 0.8);
+}
+
+// Build the final text: verse keeps its line breaks (and blank lines between stanzas); prose is joined into sentences
+function rowsToText(rows) {
+  const verse = isVerseRows(rows);
+  let out = '';
+  for (const r of rows) {
+    if (r.stanza) { out = out.replace(/\s+$/, '') + '\n\n'; continue; }
+    if (!out || out.endsWith('\n')) out += r.t;
+    else if (verse) out += '\n' + r.t;
+    else out += (out.endsWith('-') && /^[a-z]/.test(r.t) ? '' : ' ') + r.t; // re-join words hyphenated at a line end
+  }
+  return out;
+}
+
+// Tidy spacing but keep line breaks: single break = new line, blank line = new stanza/paragraph
+export function tidyText(t) {
+  return String(t || '').replace(/\r/g, '').split('\n').map(l => l.replace(/[ \t]+/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function cleanDialogue(t) {
-  return t.replace(/\s+/g, ' ').replace(/\s*\((?:beat|pause|then)\)\s*/gi, ' ').trim();
+  // Parentheticals like (singing), (beat), (to Tom) are acting notes, not words you say
+  return t.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 // Shared: assign ids, merge tiny scenes, compute characters.
 export function finalize(entries, scenes) {
-  let out = entries.filter(e => e.text && e.text.trim()).map(e => { const c = { ...e }; delete c._open; c.text = c.text.replace(/\s+/g, ' ').trim(); return c; });
+  let out = entries.map(e => { const c = { ...e }; if (c._rows) c.text = rowsToText(c._rows); delete c._open; delete c._rows; c.text = tidyText(c.text); return c; }).filter(e => e.text);
   scenes = scenes.slice();
   // If no scenes detected, chunk into "Part" sections of ~25 lines of dialogue
   if (!scenes.length) {

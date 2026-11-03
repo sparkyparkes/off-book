@@ -1,6 +1,7 @@
 import { parseScript, textToLines, pdfItemsToLines, ocrBlocksToLines, finalize } from './parser.js';
 import { evaluate } from './scoring.js';
 import { localApi, exportAll, importAll } from './local-db.js';
+import { renderEditor } from './editor.js';
 import { initSync, signIn, signOutUser, syncNow, syncState, onSyncChange, isConfigured } from './sync.js';
 
 const BASE = window.location.pathname.replace(/\/index\.html$/, '').replace(/\/+$/, '');
@@ -61,6 +62,7 @@ function floatXP(amount, el) {
 
 const modal = {
   open(html, onMount) {
+    document.getElementById('modal-card').className = 'modal-card';
     document.getElementById('modal-card').innerHTML = html;
     document.getElementById('modal').classList.remove('hidden');
     onMount && onMount(document.getElementById('modal-card'));
@@ -210,7 +212,7 @@ onSyncChange(async (st) => {
   if (st.dataChanged) {
     // New data arrived from another device: refresh what's on screen (but never interrupt a practice session)
     try { profile = normalizeProfile(await api('/profile')); renderPlayer(); } catch { /* */ }
-    if (!(location.hash || '').startsWith('#/practice/')) { current.script = null; router(); }
+    if (!(location.hash || '').startsWith('#/practice/') && !activeEditor) { current.script = null; router(); }
   } else if ((location.hash || '#/') === '#/' && document.getElementById('data-card')) {
     const n = document.getElementById('sync-line'); if (n) n.innerHTML = syncLineHTML();
   }
@@ -306,6 +308,7 @@ const routes = [
   [/^#\/practice\/([\w-]+)$/, (m) => renderPractice(m[1])],
 ];
 async function router() {
+  flushEditor();
   window.speechSynthesis?.cancel?.();
   stopListening();
   const h = location.hash || '#/';
@@ -621,8 +624,8 @@ function renderAdd() {
         <h2>Who are you playing?</h2>
         <p class="sub">We found <b>${characters.length}</b> characters, <b>${nLines}</b> lines and <b>${scenes.length}</b> scene${scenes.length === 1 ? '' : 's'}. Pick one or more roles (great for doubling).</p>
         ${characters.length ? `<div class="char-list">${characters.map(c => `<label class="char ${st.mine.has(c.name) ? 'on' : ''}"><input type="checkbox" value="${esc(c.name)}" ${st.mine.has(c.name) ? 'checked' : ''}><span class="n">${esc(titleCase(c.name))}</span><span class="c">${c.count} lines</span></label>`).join('')}</div>` : '<div class="empty">No characters found. Check that the script names each speaker, or paste the text instead.</div>'}
-        ${st.scan ? `<div class="notice" style="margin-top:18px"><i class="fa-solid fa-camera" aria-hidden="true"></i> We scanned <b>${st.scan.pages}</b> page${st.scan.pages === 1 ? '' : 's'} (reading quality ${st.scan.confidence}%). Scans can misread a few words, so check the preview below. You can fix any line later in the <b>Full Script</b> tab.</div>` : ''}
-        <div class="tip" style="margin-top:18px">Names look wrong, or lines are missing? You can fix any line's wording or speaker after saving, from the script's <b>Full Script</b> tab. (<b>Smart read</b>, which uses AI to re-read a script, is only in the online version.)</div>
+        ${st.scan ? `<div class="notice" style="margin-top:18px"><i class="fa-solid fa-camera" aria-hidden="true"></i> We scanned <b>${st.scan.pages}</b> page${st.scan.pages === 1 ? '' : 's'} (reading quality ${st.scan.confidence}%). Scans can misread a few words, so check the preview below. You can fix any line later in the <b>Edit Script</b> tab.</div>` : ''}
+        <div class="tip" style="margin-top:18px">Names look wrong, or lines are missing? You can fix any line's wording or speaker after saving, from the script's <b>Edit Script</b> tab. (<b>Smart read</b>, which uses AI to re-read a script, is only in the online version.)</div>
         <h3 style="margin-top:22px">Preview</h3>
         <div class="script-view" id="preview"></div>
         <div class="row" style="margin-top:18px"><button class="btn" id="back">Back</button><span class="spacer"></span><button class="btn primary big" id="next" ${st.mine.size ? '' : 'disabled'}>Continue</button></div>
@@ -655,7 +658,7 @@ function renderAdd() {
           <div class="stat"><b>~${days} days</b><span>at 15 new lines/day</span></div>
         </div>
         <label class="field"><span>Script title</span><input type="text" id="title" value="${esc(st.title || 'Untitled script')}"></label>
-        <p class="muted small">You can fix any line's wording or speaker later from the script's <b>Full script</b> tab.</p>
+        <p class="muted small">You can fix any line's wording or speaker later from the script's <b>Edit Script</b> tab.</p>
         <div class="row" style="margin-top:12px"><button class="btn" id="back">Back</button><span class="spacer"></span><button class="btn primary big" id="save">Save &amp; Start Learning</button></div>
       </div>`;
     el.querySelector('#title').oninput = (e) => { st.title = e.target.value; };
@@ -701,7 +704,11 @@ const SR_CTOR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const CAN_LISTEN = !!SR_CTOR;
 let prefs = { mode: 'auto', speak: false, context: true, input: CAN_LISTEN ? 'speak' : 'type' };
 
+let activeEditor = null;
+function flushEditor() { if (activeEditor) { const e = activeEditor; activeEditor = null; e.flush().catch(() => {}); } }
+
 async function renderScript(id, tab = 'scenes') {
+  flushEditor();
   const script = await loadScript(id);
   const st = stats(script);
   const lines = myLines(script);
@@ -745,7 +752,7 @@ async function renderScript(id, tab = 'scenes') {
     </div>
 
     <div class="tabs">
-      ${[['scenes', 'Scenes'], ['trouble', `Trouble Spots${troubleCount ? ` (${troubleCount})` : ''}`], ['map', 'Line Map'], ['script', 'Full Script'], ['settings', 'Settings']].map(([k, n]) => `<button class="tab ${tab === k ? 'on' : ''}" data-tab="${k}">${n}</button>`).join('')}
+      ${[['scenes', 'Scenes'], ['trouble', `Trouble Spots${troubleCount ? ` (${troubleCount})` : ''}`], ['map', 'Line Map'], ['script', 'Edit Script'], ['settings', 'Settings']].map(([k, n]) => `<button class="tab ${tab === k ? 'on' : ''}" data-tab="${k}">${n}</button>`).join('')}
     </div>
     <div id="tab"></div>`;
 
@@ -787,9 +794,14 @@ async function renderScript(id, tab = 'scenes') {
       <div class="legend">${MASTERY.map((m, i) => `<span><i style="background:var(--m${i})"></i>${m}</span>`).join('')}</div></div>`;
     el.querySelectorAll('[data-line]').forEach(b => b.onclick = () => showLine(script, b.dataset.line));
   } else if (tab === 'script') {
-    const mineSet = new Set(script.myCharacters);
-    el.innerHTML = `<div class="card"><p class="muted small" style="margin-top:0">Your lines are highlighted. Click any line to fix its wording or who says it.</p><div class="script-view" style="max-height:640px">${script.data.entries.map(e => entryHTML(e, mineSet, e.type !== 'scene')).join('')}</div></div>`;
-    el.querySelectorAll('.sv-entry.editable').forEach(d => d.onclick = () => editEntry(script, d.dataset.id));
+    activeEditor = renderEditor(el, script, {
+      esc, toast, modal, confirmBox, titleCase,
+      save: async (data, extra) => {
+        await api(`/scripts/${script.id}`, { method: 'PUT', body: { data, ...extra } });
+        const fresh = await api(`/scripts/${script.id}`);
+        script.data = fresh.data; script.myCharacters = fresh.myCharacters;
+      },
+    });
   } else if (tab === 'settings') {
     el.innerHTML = `<div class="card">
       <label class="field"><span>Script title</span><div class="row"><input type="text" id="t" value="${esc(script.title)}" style="flex:1"><button class="btn" id="save-t">Save</button></div></label>
@@ -926,7 +938,9 @@ function fadeHTML(text, frac, seed) {
 }
 
 function lettersHTML(text) {
-  return `<span class="fl">${esc(text.split(/\s+/).map(w => { const m = w.match(/^([^\w]*)([\w])[\w'’\-]*([^\w]*)$/); return m ? m[1] + m[2] + m[3] : w; }).join(' '))}</span>`;
+  // Keep the line breaks (song lyrics, poetry) — only shorten each word to its first letter
+  const short = (line) => line.split(/\s+/).filter(Boolean).map(w => { const m = w.match(/^([^\w]*)([\w])[\w'’\-]*([^\w]*)$/); return m ? m[1] + m[2] + m[3] : w; }).join(' ');
+  return `<span class="fl">${esc(text.split('\n').map(short).join('\n'))}</span>`;
 }
 
 function speak(text, rate = 1, onEnd) {
@@ -1057,10 +1071,13 @@ function drawCard(script) {
     if (revealed.size > 0) {
       // Line skeleton: words you already have, hint words highlighted, blanks for the rest
       const { knownWords } = evaluate(line.text, lastAttempt, evalOpts);
-      const parts = scriptWords.map((w, k) => revealed.has(k) && !knownWords[k] ? `<span class="hint-words">${esc(w)}</span>`
+      const wordHTML = (w, k) => revealed.has(k) && !knownWords[k] ? `<span class="hint-words">${esc(w)}</span>`
         : knownWords[k] ? `<span class="known">${esc(w)}</span>`
-        : `<span class="blank" style="width:${Math.min(8, Math.max(1.6, w.replace(/[^\w']/g, '').length * 0.55))}em"></span>`);
-      return `<div class="line-text skeleton">${parts.join(' ')}</div>${hintNote ? `<div class="small" style="margin-top:6px;color:var(--brand-dark)">${hintNote}</div>` : ''}`;
+        : `<span class="blank" style="width:${Math.min(8, Math.max(1.6, w.replace(/[^\w']/g, '').length * 0.55))}em"></span>`;
+      // Walk the words in order, keeping line and stanza breaks where they are
+      let k = 0;
+      const parts = line.text.split(/(\s+)/).filter(Boolean).map(tok => /^\s+$/.test(tok) ? (tok.includes('\n') ? tok.replace(/[^\n]/g, '') : ' ') : wordHTML(tok, k++));
+      return `<div class="line-text skeleton">${parts.join('')}</div>${hintNote ? `<div class="small" style="margin-top:6px;color:var(--brand-dark)">${hintNote}</div>` : ''}`;
     }
     if (mode === 'fade') return `<div class="line-text">${fadeHTML(line.text, frac, seed)}</div>`;
     if (mode === 'letters') return `<div class="line-text">${lettersHTML(line.text)}</div>`;
