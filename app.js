@@ -707,11 +707,11 @@ async function loadScript(id) {
 }
 
 const MODES = [
-  { id: 'auto', name: 'Smart Mix', desc: 'Adapts to how well you know each line' },
-  { id: 'learn', name: 'Learn', desc: 'Read it 3×, then say it from memory' },
+  { id: 'auto', name: 'Smart Mix', desc: 'Fades each line step by step until you can say it from memory' },
+  { id: 'learn', name: 'Learn', desc: 'Read it, then say it from memory' },
   { id: 'fade', name: 'Fade Out', desc: 'Fill in the missing words' },
   { id: 'letters', name: 'First Letters', desc: 'Only the first letter of each word' },
-  { id: 'recall', name: 'Cue Only', desc: 'Just your cue — full test' },
+  { id: 'recall', name: 'From Memory', desc: 'Just your cue — the whole line from memory' },
 ];
 const SR_CTOR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const CAN_LISTEN = !!SR_CTOR;
@@ -911,8 +911,9 @@ function buildQueue(script, cfg) {
     // Smart review: trouble first, then overdue reviews, then a few new lines — all played in script order
     const due = lines.filter(l => P[l.id] && P[l.id].due <= now).sort((a, b) => troubleRank(P[b.id]) - troubleRank(P[a.id]) || P[a.id].due - P[b.id].due);
     const fresh = lines.filter(l => !P[l.id]);
-    const picked = [...due.slice(0, 18)];
-    picked.push(...fresh.slice(0, Math.max(5, 25 - picked.length)));
+    // Each new line climbs the whole ladder in one session, so take a handful at a time
+    const picked = [...due.slice(0, 15)];
+    picked.push(...fresh.slice(0, prefs.mode === 'auto' ? (picked.length ? 4 : 6) : Math.max(5, 25 - picked.length)));
     if (!picked.length) picked.push(...lines.slice().sort((a, b) => (P[a.id]?.due || 0) - (P[b.id]?.due || 0)).slice(0, 15));
     const order = new Map(lines.map((l, i) => [l.id, i]));
     q = picked.slice(0, 25).sort((a, b) => order.get(a.id) - order.get(b.id));
@@ -1045,7 +1046,38 @@ async function renderPractice(id) {
   drawCard(script);
 }
 
-const MODE_NAMES = { learn: 'Learn', fade: 'Fade Out', letters: 'First Letters', recall: 'Cue Only' };
+const MODE_NAMES = { learn: 'Learn', fade: 'Fade Out', letters: 'First Letters', recall: 'From Memory' };
+
+// ---- Smart Mix ladder ("vanishing cues"): help is taken away one step at a time within a session,
+// and a line is only finished when you can say the whole thing from memory. Each step comes back a few
+// cards later (short spacing), and the from-memory test is then repeated on later days (spaced repetition).
+const LADDER = ['fade1', 'fade2', 'letters', 'recall'];
+const STEP = {
+  fade1:   { mode: 'fade', frac: 0.3,  name: 'Fade Out · Light', mastery: 1 },
+  fade2:   { mode: 'fade', frac: 0.65, name: 'Fade Out · Heavy', mastery: 2 },
+  letters: { mode: 'letters',          name: 'First Letters',    mastery: 2 },
+  recall:  { mode: 'recall',           name: 'From Memory',      mastery: 3 },
+};
+// Where a line starts today, based on how well you knew it last time (trouble spots start one step easier)
+function startStep(p) {
+  if (!p || !p.attempts) return 0;
+  let m = p.mastery || 0;
+  if (p.trouble) m = Math.max(0, m - 1);
+  return [0, 1, 2, 3, 3, 3][m];
+}
+// Progress on a supported step: counts the practice, but the spaced-repetition schedule only moves
+// on the real test (from memory). Mistakes while still learning don't make a line a "trouble spot".
+function scaffoldUpdate(prev, g, mastery) {
+  const now = Date.now();
+  const p = { mastery: 0, ease: 2.5, ivl: 0, reps: 0, attempts: 0, misses: 0, hards: 0, streak: 0, trouble: false, ...prev };
+  p.attempts++; p.lastSeen = now; p.lastGrade = g;
+  if (g === 0) p.misses++;
+  else if (g === 1) p.hards++;
+  else p.mastery = Math.max(p.mastery, mastery);
+  p.due = Math.min(p.due || now, now); // stays due until you've said it from memory
+  p.troubleScore = +((2 * p.misses + p.hards) / p.attempts).toFixed(2);
+  return p;
+}
 
 function drawCard(script) {
   const s = session;
@@ -1053,10 +1085,16 @@ function drawCard(script) {
   const item = s.queue[s.i];
   const line = item.line;
   const p = script.progress[line.id];
-  const mode = modeFor(p);
+  const auto = prefs.mode === 'auto';
+  s.ladder ||= {};
+  const st = auto ? (s.ladder[line.id] ||= { step: startStep(p), start: startStep(p), shows: 0, read: false }) : null;
+  const stepKey = auto ? LADDER[st.step] : null;
+  const mode = auto ? STEP[stepKey].mode : modeFor(p);
+  // Brand-new lines get one read-through first, then go straight into the first fade step
+  const firstRead = auto && !st.read && (!p || !p.attempts) && st.step === 0;
   const { cue, dir } = cueFor(script, line);
   const done = Object.keys(s.results).length;
-  const frac = mode === 'fade' ? ((p?.mastery || 0) >= 3 ? 0.75 : 0.45) : 0;
+  const frac = mode === 'fade' ? (auto ? STEP[stepKey].frac : ((p?.mastery || 0) >= 3 ? 0.75 : 0.45)) : 0;
   const seed = line.id + ':' + (p?.attempts || 0);
   let useVoice = prefs.input === 'speak' && CAN_LISTEN;
   const scriptWords = spokenText(line.text).split(/\s+/).filter(Boolean);
@@ -1073,7 +1111,7 @@ function drawCard(script) {
         ${CAN_LISTEN ? `<button class="btn sm input-switch" id="switch-input" title="Change how you answer" aria-label="${useVoice ? 'Switch to typing' : 'Switch to speaking'}">${useVoice ? '<i class="fa-regular fa-keyboard" aria-hidden="true"></i><span class="sw-label"> Switch to Typing</span>' : '<i class="fa-solid fa-microphone" aria-hidden="true"></i><span class="sw-label"> Switch to Speaking</span>'}</button>` : ''}
       </div>
       <div class="stage">
-        <span class="mode-pill">${MODE_NAMES[mode]}${p?.trouble ? ' · trouble spot' : ''}</span>
+        <span class="mode-pill">${auto ? `${firstRead ? 'New line' : STEP[stepKey].name} · step ${st.step + 1} of ${LADDER.length}` : MODE_NAMES[mode]}${p?.trouble ? ' · trouble spot' : ''}</span>
         <div class="small muted">${esc(script.data.scenes[line.scene]?.title || '')}</div>
         ${prefs.context && dir ? `<div class="ctx">${esc(dir.text)}</div>` : ''}
         <div class="cue-box"><div class="who">${cue ? esc(cue.speaker) + (script.myCharacters.includes(cue.speaker) ? ' (you)' : '') : 'Top of scene'} ${cue ? `<button class="speak-btn" id="say-cue" title="Hear cue" aria-label="Hear cue"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button>` : ''}</div><div class="cue-text">${cue ? richText(cue.text) : '<span class="muted">You speak first.</span>'}</div></div>
@@ -1091,7 +1129,7 @@ function drawCard(script) {
   const cleanup = () => { stopListening(); clearTimeout(advanceTimer); document.removeEventListener('keydown', keyHandler); window.speechSynthesis?.cancel?.(); };
   window.addEventListener('hashchange', cleanup, { once: true });
 
-  document.getElementById('quit').onclick = () => { cleanup(); if (Object.keys(s.results).length) drawSummary(script); else location.hash = `#/script/${script.id}`; };
+  document.getElementById('quit').onclick = () => { cleanup(); if (Object.keys(s.results).length || s.xp) drawSummary(script); else location.hash = `#/script/${script.id}`; };
   const sayCue = document.getElementById('say-cue');
   if (sayCue) sayCue.onclick = () => speak(spokenText(cue.text));
   const sw = document.getElementById('switch-input');
@@ -1293,8 +1331,34 @@ function drawCard(script) {
   const record = (g, btn) => {
     const prev = script.progress[line.id];
     const wasTrouble = prev?.trouble;
-    const { p: np, fixed } = applyGrade(prev, g);
-    script.progress[line.id] = np;
+    let fixed = false, finished = true;
+    if (auto && stepKey !== 'recall') {
+      // A supported step: move up (or back) the ladder and see the line again a few cards later
+      script.progress[line.id] = scaffoldUpdate(prev, g, STEP[stepKey].mastery);
+      st.shows++;
+      if (g >= 2) st.step = Math.min(LADDER.length - 1, st.step + 1);
+      else if (g === 0) st.step = Math.max(0, st.step - 1);
+      finished = st.shows >= 8; // don't let one line take over the session
+      if (!finished) s.queue.splice(Math.min(s.queue.length, s.i + (LADDER[st.step] === 'recall' ? 5 : 3)), 0, { line, requeued: item.requeued + 1 });
+    } else {
+      // The real test (from memory), or a practice style you picked yourself: normal spaced repetition
+      const res = applyGrade(prev, g);
+      fixed = res.fixed;
+      if (auto && st.start < 3 && g >= 2) {
+        // Learned it today: solid, but confirm it tomorrow before calling it "off book"
+        res.p.mastery = Math.min(res.p.mastery, 3);
+        res.p.due = Date.now() + DAY;
+      }
+      script.progress[line.id] = res.p;
+      if (auto) {
+        st.shows++;
+        if (g < 2 && st.shows < 8) {
+          if (g === 0) st.step = LADDER.indexOf('letters'); // missed it: one step of help, then try again
+          s.queue.splice(Math.min(s.queue.length, s.i + 4), 0, { line, requeued: item.requeued + 1 });
+          finished = false;
+        }
+      }
+    }
     saveProgress(script);
     if (g >= 2) { s.combo++; s.bestCombo = Math.max(s.bestCombo, s.combo); } else s.combo = 0;
     const comboEl = document.getElementById('combo');
@@ -1307,6 +1371,12 @@ function drawCard(script) {
     if (s.combo > profile.bestCombo) profile.bestCombo = s.combo;
     if (s.combo && s.combo % 5 === 0) toast(`${s.combo}× combo!`, 'You\'re in the zone.', '<i class="fa-solid fa-bolt" aria-hidden="true"></i>');
     recordReview();
+    if (auto) {
+      // Smart Mix: a line counts as done once you've said it from memory
+      if (finished) s.results[line.id] = Math.min(g, s.worst?.[line.id] ?? 3);
+      if (stepKey === 'recall' || g === 0) { s.worst ||= {}; s.worst[line.id] = Math.min(g, s.worst[line.id] ?? 3); }
+      return;
+    }
     if (!(line.id in s.results) || g < s.results[line.id]) s.results[line.id] = g;
     // Lines you struggled with come back later in the same session
     if (g === 0 && item.requeued < 2) s.queue.splice(Math.min(s.queue.length, s.i + 4), 0, { line, requeued: item.requeued + 1 });
@@ -1320,18 +1390,13 @@ function drawCard(script) {
   };
   document.addEventListener('keydown', keyHandler);
 
-  if (mode === 'learn') {
+  if (mode === 'learn' || firstRead) {
     phase = 'learn';
-    let reps = 0;
     mine.innerHTML = `${who}<div class="line-text">${richText(line.text)}</div>`;
-    const drawReps = () => {
-      controls.innerHTML = `<div class="row"><div class="reps">${[0, 1, 2].map(i => `<i class="${i < reps ? 'on' : ''}"></i>`).join('')}</div><span class="muted small">Read it aloud with your cue, 3 times</span><span class="spacer"></span>
-        <button class="btn ghost sm" id="hear" aria-label="Hear the line"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button><button class="btn" id="rep">I Said It (${reps}/3)</button><button class="btn primary" id="go">Hide It &amp; Test Me →</button></div>`;
-      document.getElementById('hear').onclick = () => speak(spokenText(line.text), 0.95);
-      document.getElementById('rep').onclick = () => { reps = Math.min(3, reps + 1); drawReps(); };
-      document.getElementById('go').onclick = () => beginAnswer(false);
-    };
-    drawReps();
+    controls.innerHTML = `<div class="row"><span class="muted small">${firstRead ? 'New line: read it aloud with your cue, then try it with some words hidden.' : 'Read it aloud with your cue, then say it from memory.'}</span><span class="spacer"></span>
+      <button class="btn ghost sm" id="hear" aria-label="Hear the line"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button><button class="btn primary" id="go">Test Me →</button></div>`;
+    document.getElementById('hear').onclick = () => speak(spokenText(line.text), 0.95);
+    document.getElementById('go').onclick = () => { if (st) st.read = true; beginAnswer(false); };
     if (prefs.speak && cue) setTimeout(() => speak(spokenText(cue.text)), 250);
   } else {
     beginAnswer(true);
