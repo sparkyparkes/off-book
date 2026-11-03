@@ -1265,7 +1265,23 @@ function drawCard(script) {
       ta.value = initial;
       setTimeout(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }, 30);
       // Moves on the moment the line is right
-      ta.addEventListener('input', () => { lastAttempt = ta.value; const r = evaluate(line.text, ta.value, evalOpts); if (r.correct) success(ta.value); else if (revealed.size) drawPrompt(); });
+      // Moves on the moment the line is right — but if the LAST word only "counts" as a misspelling,
+      // you may simply not have finished typing it ("don" → "done"), so wait until you finish the word
+      // (space or punctuation), pause for a moment, or press Enter.
+      let settleTimer = null;
+      ta.addEventListener('input', () => {
+        clearTimeout(settleTimer);
+        lastAttempt = ta.value;
+        const r = evaluate(line.text, ta.value, evalOpts);
+        if (r.correct) {
+          const lastWordExact = !r.marks.length || !r.marks[r.marks.length - 1].spell;
+          const wordFinished = /[\s.,!?;:'"”’)\]\-—]$/.test(ta.value);
+          if (lastWordExact || wordFinished) return success(ta.value);
+          settleTimer = setTimeout(() => { if (phase === 'answer' && ta.value === lastAttempt) success(ta.value); }, 1800);
+          return;
+        }
+        if (revealed.size) drawPrompt();
+      });
       ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); tryAttempt(ta.value, true); } });
       document.getElementById('done').onclick = () => tryAttempt(ta.value, true);
     }
