@@ -1622,7 +1622,7 @@ function drawSpot(script, item) {
         <div class="small muted">${esc(script.data.scenes[line.scene]?.title || '')}</div>
         <div class="cue-box"><div class="who">${cue ? esc(cue.speaker) : 'Top of scene'}</div><div class="cue-text">${cue ? richText(cue.text) : '<span class="muted">You speak first.</span>'}</div></div>
         <div class="mine-box" id="mine"><div class="who">${esc(line.speaker)}</div>
-          <p class="small muted" style="margin:0 0 8px">One thing in your line has been changed. Tap the wrong word.</p>
+          <p class="small muted" style="margin:0 0 8px">One thing in your line has been changed — a word swapped for a similar one, a contraction, or an extra word. Tap it.</p>
           <div class="line-text spot">${err.words.map((w, i) => `<button class="spot-word" data-i="${i}">${esc(w.text)}</button>`).join(' ')}</div>
         </div>
         <div id="controls"></div>
@@ -1636,7 +1636,7 @@ function drawSpot(script, item) {
       <div class="result-head"><span class="pill g${g}">${g ? '<i class="fa-solid fa-check" aria-hidden="true"></i> ' : ''}${g === 2 ? 'Found It' : g === 1 ? 'Found It (2nd try)' : 'Missed It'}</span></div>
       <div class="said">${err.words.map(w => `<span class="${w.wrong ? 'bad' : 'ok'}">${esc(w.text)}</span>`).join(' ')}</div>
       <div class="line-text" style="margin-top:8px">${richText(line.text)}</div>
-      <div class="small muted" style="margin-top:6px">It should be “${esc(err.fix)}”.</div>`;
+      <div class="small muted" style="margin-top:6px">${err.kind === 'insert' ? esc(err.fix) : `It should be ${esc(err.fix)}.`}</div>`;
     document.getElementById('controls').innerHTML = `<div class="row"><span class="spacer"></span><button class="btn primary" id="next">Next →</button></div>`;
     const next = () => { clearTimeout(advance); s.i++; drawCard(script); };
     document.getElementById('next').onclick = next;

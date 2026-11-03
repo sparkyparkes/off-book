@@ -86,56 +86,102 @@ export function pacing({ total, learned, learnedToday, deadline, now = Date.now(
 }
 
 // ---------------------------------------------------------------- Spot the Error
-const SWAPS = [['a', 'the'], ['this', 'that'], ['these', 'those'], ['will', 'would'], ['can', 'could'], ['shall', 'should'],
-  ['is', 'was'], ['are', 'were'], ['my', 'your'], ['he', 'she'], ['him', 'her'], ['his', 'her'], ['we', 'you'], ['never', 'ever'],
-  ['all', 'every'], ['some', 'any'], ['then', 'now'], ['here', 'there'], ['just', 'only'], ['so', 'very'], ['and', 'but'],
-  ['if', 'when'], ['know', 'think'], ['want', 'need'], ['said', 'told'], ['come', 'go'], ['little', 'small'], ['big', 'large'],
-  ['always', 'often'], ['maybe', 'perhaps'], ['really', 'truly'], ['before', 'after'], ['up', 'down'], ['in', 'on'], ['to', 'for'],
-  ['of', 'from'], ['me', 'us'], ['our', 'their'], ['not', 'never'], ['look', 'see'], ['tell', 'ask'], ['give', 'get']];
-const SWAP_MAP = new Map(); SWAPS.forEach(([x, y]) => { SWAP_MAP.set(x, y); SWAP_MAP.set(y, x); });
+// The change has to be believable: the kind of paraphrase an actor really slips into.
+// A near-synonym ("begin" for "start"), a contraction ("do not" <-> "don't"), a small word swap that
+// keeps the meaning ("that" for "this"), or an extra filler word ("I just think..."). Never word-order
+// shuffles or random look-alike words, which are too easy to spot.
+const SYN_GROUPS = [
+  ['start', 'begin'], ['started', 'began'], ['starting', 'beginning'], ['starts', 'begins'],
+  ['end', 'finish'], ['ended', 'finished'], ['ending', 'finishing'],
+  ['big', 'large'], ['huge', 'enormous'], ['small', 'little'], ['tiny', 'little'],
+  ['fast', 'quick'], ['quickly', 'fast'],
+  ['maybe', 'perhaps'], ['really', 'truly'], ['very', 'really'], ['just', 'only'], ['only', 'just'],
+  ['happy', 'glad'], ['sad', 'upset'], ['angry', 'mad'], ['afraid', 'scared'], ['scared', 'frightened'], ['sure', 'certain'],
+  ['look at', 'check out'], ['looking at', 'staring at'], ['watch', 'see'],
+  ['think', 'believe'], ['thought', 'believed'], ['guess', 'suppose'], ['suppose', 'guess'], ['know', 'realize'],
+  ['talk', 'speak'], ['talked', 'spoke'], ['talking', 'speaking'],
+  ['shout', 'yell'], ['shouted', 'yelled'], ['shouting', 'yelling'],
+  ['house', 'home'], ['road', 'street'], ['shop', 'store'], ['kids', 'children'], ['children', 'kids'], ['child', 'kid'],
+  ['mom', 'mother'], ['mother', 'mom'], ['dad', 'father'], ['father', 'dad'],
+  ['beautiful', 'lovely'], ['pretty', 'lovely'], ['lovely', 'beautiful'], ['nice', 'lovely'], ['great', 'wonderful'],
+  ['wonderful', 'marvelous'], ['terrible', 'awful'], ['awful', 'horrible'], ['stupid', 'foolish'], ['silly', 'foolish'],
+  ['strange', 'odd'], ['weird', 'strange'], ['odd', 'strange'],
+  ['tired', 'exhausted'], ['hungry', 'starving'], ['cold', 'freezing'], ['quiet', 'silent'],
+  ['wrong', 'mistaken'], ['correct', 'right'],
+  ['often', 'always'], ['soon', 'shortly'],
+  ['yes', 'yeah'], ['yeah', 'yes'], ['okay', 'all right'], ['hello', 'hi'], ['hi', 'hello'], ['goodbye', 'bye'],
+  ['love', 'adore'], ['hate', 'despise'],
+  ['try', 'attempt'], ['tried', 'attempted'], ['grab', 'take'],
+  ['bought', 'got'], ['find', 'discover'], ['found', 'discovered'],
+  ['remember', 'recall'], ['understand', 'see'], ['wait', 'hold on'], ['stay', 'remain'],
+  ['everyone', 'everybody'], ['everybody', 'everyone'], ['someone', 'somebody'], ['somebody', 'someone'], ['anyone', 'anybody'], ['anybody', 'anyone'],
+  ['nobody', 'no one'], ['something', 'anything'],
+  ['kind of', 'sort of'], ['sort of', 'kind of'], ['a lot', 'lots'], ['going to', 'gonna'], ['want to', 'wanna'], ['got to', 'gotta'],
+];
+const SYN = new Map();
+SYN_GROUPS.forEach(([a, b]) => { if (!SYN.has(a)) SYN.set(a, b); });
+// Small words swapped for one with (nearly) the same meaning
+const LIGHT_SWAPS = new Map([['this', 'that'], ['that', 'this'], ['these', 'those'], ['those', 'these'], ['will', 'would'], ['would', 'will'],
+  ['can', 'could'], ['could', 'can'], ['shall', 'will'], ['a', 'the'], ['the', 'a'],
+  ['but', 'though'], ['until', 'till'], ['because', 'since'], ['since', 'because'],
+  ['must', 'have to'], ['may', 'might'], ['might', 'may']]);
 const CONTRACTIONS = { "don't": 'do not', "i'm": 'I am', "it's": 'it is', "you're": 'you are', "can't": 'cannot', "won't": 'will not',
   "we'll": 'we will', "i'll": 'I will', "didn't": 'did not', "isn't": 'is not', "that's": 'that is', "i've": 'I have', "we're": 'we are',
   "they're": 'they are', "doesn't": 'does not', "wasn't": 'was not', "couldn't": 'could not', "wouldn't": 'would not', "let's": 'let us',
-  "you'll": 'you will', "he's": 'he is', "she's": 'she is', "there's": 'there is', "what's": 'what is', "i'd": 'I would', "you've": 'you have' };
+  "you'll": 'you will', "he's": 'he is', "she's": 'she is', "there's": 'there is', "what's": 'what is', "i'd": 'I would', "you've": 'you have',
+  "aren't": 'are not', "haven't": 'have not', "shouldn't": 'should not', "we've": 'we have', "they'll": 'they will', "he'll": 'he will',
+  "she'll": 'she will', "who's": 'who is', "where's": 'where is', "weren't": 'were not', "hasn't": 'has not' };
+const EXPANDED = new Map(Object.entries(CONTRACTIONS).map(([c, e]) => [e.toLowerCase(), c]));
+const SUBJECTS = new Set(['i', 'you', 'we', 'they', 'he', 'she']);
+const VERBS = new Set(['think', 'want', 'need', 'know', 'said', 'saw', 'wanted', 'thought', 'feel', 'like', 'love', 'hate', 'came', 'went',
+  'meant', 'mean', 'wish', 'hope', 'told', 'heard', 'forgot', 'remember', "don't", "can't", 'did']);
+const FILLERS_IN = ['just', 'really', 'actually'];
+const OPENERS = ['Well,', 'Oh,', 'Look,', 'Now,', 'So,'];
 
-// Returns { words: [{ text, wrong }], fix: 'the correct words' } with exactly one change; null if the line is too short
+// Returns { words: [{ text, wrong }], fix, kind } with exactly one believable change; null if nothing fits
 export function makeSpotError(text, vocab = [], rnd = Math.random) {
   const words = String(text || '').replace(DIR_RE, ' ').split(/\s+/).filter(Boolean);
   if (words.filter(w => /[A-Za-z]/.test(w)).length < 4) return null;
-  const core = (w) => w.replace(/^[^\w'’]+|[^\w'’]+$/g, '').replace(/’/g, "'");
-  const wrap = (orig, rep) => { const m = orig.match(/^([^\w'’]*)(.*?)([^\w'’]*)$/); return m[1] + rep + m[3]; };
-  const matchCase = (src, rep) => (src[0] === src[0].toUpperCase() ? rep[0].toUpperCase() + rep.slice(1) : rep);
+  const core = (w) => (w || '').replace(/^[^\w'’]+|[^\w'’]+$/g, '').replace(/’/g, "'");
+  const low = (w) => core(w).toLowerCase();
+  const lead = (w) => w.match(/^[^\w'’]*/)[0], trail = (w) => w.match(/[^\w'’]*$/)[0];
+  const matchCase = (src, rep) => (/^[A-Z]/.test(src) && src !== 'I' ? rep[0].toUpperCase() + rep.slice(1) : rep);
   const options = [];
+  // replace words[i .. i+len-1] (with no punctuation between them) by `rep`
+  const addReplace = (i, len, rep, kind, weight) => {
+    const span = words.slice(i, i + len);
+    if (len > 1 && span.slice(0, -1).some(w => trail(w))) return;
+    const orig = span.map(core).join(' ');
+    if (rep.toLowerCase() === orig.toLowerCase()) return;
+    const r = matchCase(core(span[0]), rep).replace(/^i(?=['’ ])/, 'I').replace(/^i$/, 'I');
+    for (let k = 0; k < weight; k++) options.push({ i, len, rep: r, kind, fix: orig });
+  };
   words.forEach((w, i) => {
-    const c = core(w).toLowerCase();
+    const c = low(w), c2 = i + 1 < words.length ? `${c} ${low(words[i + 1])}` : '';
     if (!c) return;
-    if (SWAP_MAP.has(c)) options.push({ i, kind: 'swap', rep: matchCase(core(w), SWAP_MAP.get(c)) });
-    if (CONTRACTIONS[c]) options.push({ i, kind: 'expand', rep: matchCase(core(w), CONTRACTIONS[c]) });
-    if (c.length >= 4) {
-      const alt = vocab.filter(v => v.length >= 3 && Math.abs(v.length - c.length) <= 2 && v !== c && v[0] === c[0]);
-      if (alt.length) options.push({ i, kind: 'vocab', rep: matchCase(core(w), alt[Math.floor(rnd() * alt.length)]) });
+    if (CONTRACTIONS[c]) addReplace(i, 1, CONTRACTIONS[c], 'contraction', 3);
+    if (c2 && EXPANDED.has(c2)) addReplace(i, 2, EXPANDED.get(c2), 'contraction', 3);
+    if (c2 && SYN.has(c2)) addReplace(i, 2, SYN.get(c2), 'synonym', 3);
+    if (SYN.has(c)) addReplace(i, 1, SYN.get(c), 'synonym', 3);
+    if (LIGHT_SWAPS.has(c)) addReplace(i, 1, LIGHT_SWAPS.get(c), 'swap', 2);
+    // an extra filler word: "I think" -> "I just think"
+    if (SUBJECTS.has(c) && i + 1 < words.length && VERBS.has(low(words[i + 1])) && !trail(w)) {
+      options.push({ i: i + 1, len: 0, rep: FILLERS_IN[Math.floor(rnd() * FILLERS_IN.length)], kind: 'insert' });
     }
-    if (i < words.length - 1 && /[A-Za-z]$/.test(w) && /^[A-Za-z]/.test(words[i + 1]) && core(words[i + 1]).toLowerCase() !== c) options.push({ i, kind: 'order' });
   });
+  // an opener at the very start ("Well, I don't...") — only if nothing more interesting is possible
+  const openers = OPENERS.filter(o => !words.some(w => low(w) === o.replace(',', '').toLowerCase()));
+  if (!options.length && openers.length && !/^(well|oh|look|now|so)$/i.test(low(words[0]))) options.push({ i: 0, len: 0, rep: openers[Math.floor(rnd() * openers.length)], kind: 'insert' });
   if (!options.length) return null;
-  // Prefer the kinds of mistakes actors really make: contractions and small word swaps
-  const weighted = options.flatMap(o => (o.kind === 'expand' ? [o, o, o] : o.kind === 'swap' ? [o, o] : [o]));
-  const pick = weighted[Math.floor(rnd() * weighted.length)];
+  const pick = options[Math.floor(rnd() * options.length)];
   const out = words.map(w => ({ text: w, wrong: false }));
-  let fix;
-  if (pick.kind === 'order') {
-    const a = words[pick.i], b = words[pick.i + 1];
-    out[pick.i] = { text: wrap(a, core(b)), wrong: true };
-    out[pick.i + 1] = { text: wrap(b, core(a)), wrong: true };
-    fix = `${core(a)} ${core(b)}`;
-  } else if (pick.kind === 'expand') {
-    const parts = pick.rep.split(' ');
-    const orig = words[pick.i];
-    out.splice(pick.i, 1, { text: wrap(orig, parts[0]).replace(/[^\w'’]+$/, ''), wrong: true }, { text: wrap(orig, parts[1]).replace(/^[^\w'’]+/, ''), wrong: true });
-    fix = core(orig);
-  } else {
-    out[pick.i] = { text: wrap(words[pick.i], pick.rep), wrong: true };
-    fix = core(words[pick.i]);
+  if (pick.len === 0) {
+    if (pick.i === 0) { const w0 = core(words[0]); out[0] = { text: lead(words[0]) + (w0 === 'I' ? w0 : w0[0].toLowerCase() + w0.slice(1)) + trail(words[0]), wrong: false }; }
+    out.splice(pick.i, 0, { text: pick.rep, wrong: true });
+    return { words: out, fix: `There's no “${pick.rep.replace(/,$/, '')}” in the line.`, kind: 'insert' };
   }
-  return { words: out, fix, kind: pick.kind };
+  const first = words[pick.i], last = words[pick.i + pick.len - 1];
+  const repWords = pick.rep.split(' ');
+  out.splice(pick.i, pick.len, ...repWords.map((rw, k) => ({ text: (k === 0 ? lead(first) : '') + rw + (k === repWords.length - 1 ? trail(last) : ''), wrong: true })));
+  return { words: out, fix: `“${pick.fix}”`, kind: pick.kind };
 }
