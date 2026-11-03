@@ -957,17 +957,41 @@ function lettersHTML(text) {
   return richText(text, (seg) => seg.trim() ? `<span class="fl">${esc(lead(seg))}</span>` : esc(seg));
 }
 
+// iPhone/iPad Safari only allows speech after you've tapped something, so the first tap anywhere
+// "unlocks" it with a silent utterance. After that, cues can be read aloud automatically.
+let speechUnlocked = false;
+function unlockSpeech() {
+  if (speechUnlocked || !('speechSynthesis' in window)) return;
+  speechUnlocked = true;
+  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch { /* */ }
+}
+['touchend', 'click', 'keydown'].forEach(ev => document.addEventListener(ev, unlockSpeech, { capture: true, passive: true }));
+let englishVoice = null;
+function pickVoice() {
+  try {
+    const vs = speechSynthesis.getVoices();
+    const lang = (navigator.language || 'en-US').toLowerCase();
+    englishVoice = vs.find(v => v.lang.toLowerCase() === lang && v.localService) || vs.find(v => v.lang.toLowerCase() === lang) || vs.find(v => /^en/i.test(v.lang)) || null;
+  } catch { /* */ }
+}
+if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.addEventListener?.('voiceschanged', pickVoice); }
+
 function speak(text, rate = 1, onEnd) {
-  if (!('speechSynthesis' in window)) { onEnd && onEnd(); return; }
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.rate = rate;
+  if (!('speechSynthesis' in window) || !String(text || '').trim()) { onEnd && onEnd(); return; }
   let done = false;
   const finish = () => { if (!done) { done = true; onEnd && onEnd(); } };
-  u.onend = finish; u.onerror = finish;
   // Safety net in case the browser never fires onend
-  setTimeout(finish, Math.min(20000, 1500 + text.split(/\s+/).length * 450 / rate));
-  speechSynthesis.speak(u);
+  setTimeout(finish, Math.min(20000, 2000 + text.split(/\s+/).length * 450 / rate));
+  const go = () => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = rate; u.lang = englishVoice?.lang || navigator.language || 'en-US';
+    if (englishVoice) u.voice = englishVoice;
+    u.onend = finish; u.onerror = finish;
+    try { speechSynthesis.resume(); } catch { /* */ }
+    speechSynthesis.speak(u);
+  };
+  // Safari drops speech that starts in the same instant as a cancel, so give it a moment
+  if (speechSynthesis.speaking || speechSynthesis.pending) { speechSynthesis.cancel(); setTimeout(go, 120); } else go();
 }
 
 // ---- Speech recognition (listening to the actor)
@@ -975,9 +999,9 @@ function speak(text, rate = 1, onEnd) {
 // ends the session, and keeps what you've said so far until the line is right or you start over.
 let listener = null;
 function stopListening() { if (listener) { const l = listener; listener = null; l.stop(); } }
-function startListening({ onText, onError, onIdle }) {
+function startListening({ onText, onError, onIdle, initial = '' }) {
   stopListening();
-  let base = '', current = '', stopped = false, rec = null, idleTimer = null, restarts = 0;
+  let base = initial, current = '', stopped = false, rec = null, idleTimer = null, restarts = 0;
   const ctl = {
     get text() { return (base + ' ' + current).replace(/\s+/g, ' ').trim(); },
     reset() { base = ''; current = ''; onText(''); },
@@ -1034,7 +1058,7 @@ function drawCard(script) {
   const done = Object.keys(s.results).length;
   const frac = mode === 'fade' ? ((p?.mastery || 0) >= 3 ? 0.75 : 0.45) : 0;
   const seed = line.id + ':' + (p?.attempts || 0);
-  const useVoice = prefs.input === 'speak' && CAN_LISTEN;
+  let useVoice = prefs.input === 'speak' && CAN_LISTEN;
   const scriptWords = spokenText(line.text).split(/\s+/).filter(Boolean);
   const revealed = new Set(); // script word positions given away by hints
   const evalOpts = { speech: useVoice };
@@ -1056,14 +1080,14 @@ function drawCard(script) {
         <div class="mine-box" id="mine"></div>
         <div id="controls"></div>
       </div>
-      <p class="hint" style="text-align:center;margin-top:10px">${useVoice ? 'Say your line out loud, word for word. Take your time — it moves on when you get it right.' : 'Type your line word for word. It moves on as soon as it\'s right.'}</p>
+      <p class="hint" id="mode-hint" style="text-align:center;margin-top:10px">${useVoice ? 'Say your line out loud, word for word. Take your time — it moves on when you get it right.' : 'Type your line word for word. It moves on as soon as it\'s right.'}</p>
     </div>`;
 
   const mine = document.getElementById('mine'), controls = document.getElementById('controls');
   const who = `<div class="who">${esc(line.speaker)}</div>`;
   // Tracking for automatic grading
   let phase = 'prompt', hintClicks = 0, lastAttempt = '', hintNote = '', wrongTries = 0, peeked = 0, gaveUp = false, graded = false;
-  let keyHandler = null, advanceTimer = null, lastWrongLen = 0;
+  let keyHandler = null, advanceTimer = null, lastWrongLen = 0, heardWrong = 0;
   const cleanup = () => { stopListening(); clearTimeout(advanceTimer); document.removeEventListener('keydown', keyHandler); window.speechSynthesis?.cancel?.(); };
   window.addEventListener('hashchange', cleanup, { once: true });
 
@@ -1073,9 +1097,26 @@ function drawCard(script) {
   const sw = document.getElementById('switch-input');
   if (sw) sw.onclick = () => {
     if (phase === 'result') return;
-    // Switch how you answer and restart this line in the new mode (choice is remembered)
-    prefs.input = useVoice ? 'type' : 'speak'; savePrefs();
-    cleanup(); drawCard(script);
+    // Switch how you answer WITHOUT losing what you've said or typed so far — e.g. fix a word the
+    // speech recognizer misheard by switching to typing. Hints and tries carry over; the choice is remembered.
+    const carry = useVoice
+      ? (listener?.text || document.getElementById('heard')?.textContent || lastAttempt || '')
+      : (document.getElementById('typed')?.value ?? lastAttempt ?? '');
+    stopListening(); window.speechSynthesis?.cancel?.();
+    // Switching to typing to fix what the mic misheard shouldn't count against you
+    if (useVoice) { wrongTries = Math.max(0, wrongTries - heardWrong); heardWrong = 0; lastWrongLen = 0; }
+    useVoice = !useVoice; evalOpts.speech = useVoice;
+    prefs.input = useVoice ? 'speak' : 'type'; savePrefs();
+    sw.innerHTML = useVoice ? '<i class="fa-regular fa-keyboard" aria-hidden="true"></i><span class="sw-label"> Switch to Typing</span>' : '<i class="fa-solid fa-microphone" aria-hidden="true"></i><span class="sw-label"> Switch to Speaking</span>';
+    sw.setAttribute('aria-label', useVoice ? 'Switch to typing' : 'Switch to speaking');
+    const mh = document.getElementById('mode-hint');
+    if (mh) mh.innerHTML = useVoice ? 'Say your line out loud, word for word. Take your time — it moves on when you get it right.' : 'Type your line word for word. It moves on as soon as it\'s right.';
+    if (phase === 'answer') {
+      lastAttempt = carry.trim();
+      showAnswer(lastAttempt);
+      if (useVoice) controls._start(lastAttempt);
+      else if (lastAttempt) tryAttempt(lastAttempt, false);
+    }
     toast(prefs.input === 'type' ? 'Typing mode' : 'Speaking mode', prefs.input === 'type' ? 'Type your line and it moves on when it\'s right.' : 'Say your line out loud — take your time.', prefs.input === 'type' ? '<i class="fa-regular fa-keyboard" aria-hidden="true"></i>' : '<i class="fa-solid fa-microphone" aria-hidden="true"></i>');
   };
 
@@ -1121,7 +1162,7 @@ function drawCard(script) {
     if (revealed.size) { hintNote = ''; drawPrompt(); }
     if (final && attempt.trim()) wrongTries++;
     // When speaking: count a wrong try once you've said at least as many words as the line
-    if (!final && useVoice && r.saidWords >= r.total && r.saidWords - lastWrongLen >= r.total) { wrongTries++; lastWrongLen = r.saidWords; }
+    if (!final && useVoice && r.saidWords >= r.total && r.saidWords - lastWrongLen >= r.total) { wrongTries++; heardWrong++; lastWrongLen = r.saidWords; }
   };
 
   const giveHint = () => {
@@ -1145,7 +1186,7 @@ function drawCard(script) {
     if (ta) ta.focus();
   };
 
-  const showAnswer = () => {
+  const showAnswer = (initial = '') => {
     phase = 'answer';
     mine.innerHTML = `${who}<div id="prompt"></div><div id="feedback" style="margin-top:10px"></div>`;
     drawPrompt();
@@ -1155,12 +1196,14 @@ function drawCard(script) {
         <div class="listen">
           <button class="mic-big" id="mic" title="Pause / resume listening" aria-label="Pause or resume listening"><i class="fa-solid fa-microphone" aria-hidden="true"></i></button>
           <div class="listen-status" id="lstatus">Getting ready…</div>
-          <div class="heard" id="heard"></div>
+          <div class="heard" id="heard">${esc(initial)}</div>
         </div>${buttons}`;
       const mic = document.getElementById('mic'), status = document.getElementById('lstatus');
-      const start = () => {
+      // Resuming (or switching from typing) keeps what's already there; "Start Over" clears it
+      const start = (from) => {
         mic.classList.add('on'); status.textContent = 'Listening… take your time';
         startListening({
+          initial: (from ?? document.getElementById('heard')?.textContent ?? '').trim(),
           onText: (t) => { document.getElementById('heard').textContent = t; tryAttempt(t, false); },
           onIdle: () => { mic.classList.remove('on'); status.textContent = 'Mic paused. Tap the mic to keep going.'; },
           onError: (err) => {
@@ -1175,19 +1218,22 @@ function drawCard(script) {
         if (listener && listener.active) { stopListening(); mic.classList.remove('on'); status.textContent = 'Paused. Tap the mic to keep going.'; }
         else start();
       };
-      document.getElementById('restart').onclick = () => { if (listener) listener.reset(); document.getElementById('heard').textContent = ''; document.getElementById('feedback').innerHTML = ''; lastWrongLen = 0; if (!listener) start(); };
+      document.getElementById('restart').onclick = () => { if (listener) listener.reset(); document.getElementById('heard').textContent = ''; document.getElementById('feedback').innerHTML = ''; lastWrongLen = 0; lastAttempt = ''; if (!listener) start(''); };
       controls._start = start;
     } else {
       controls.innerHTML = `
         <textarea id="typed" placeholder="Type your line from memory…" style="min-height:96px;font-family:var(--body);font-size:18px" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="true"></textarea>${buttons}`;
       const ta = document.getElementById('typed');
-      setTimeout(() => ta.focus(), 30);
+      ta.value = initial;
+      setTimeout(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }, 30);
       // Moves on the moment the line is right
       ta.addEventListener('input', () => { lastAttempt = ta.value; const r = evaluate(line.text, ta.value, evalOpts); if (r.correct) success(ta.value); else if (revealed.size) drawPrompt(); });
       ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); tryAttempt(ta.value, true); } });
       document.getElementById('done').onclick = () => tryAttempt(ta.value, true);
     }
     document.getElementById('hint').onclick = giveHint;
+    if (revealed.size && !gaveUp) document.getElementById('hint').innerHTML = `<i class="fa-regular fa-lightbulb" aria-hidden="true"></i> Hint (${revealed.size} used)`;
+    if (gaveUp) { const hb = document.getElementById('hint'); hb.disabled = true; hb.textContent = 'Full Line Shown'; document.getElementById('idk')?.remove(); }
     document.getElementById('idk').onclick = () => {
       // Shows the line; you still say/type it once to lock it in and move on
       gaveUp = true; drawPrompt();
@@ -1202,8 +1248,8 @@ function drawCard(script) {
     showAnswer();
     if (!useVoice) { if (afterCue && prefs.speak && cue) speak(spokenText(cue.text)); return; }
     // Read the cue first (if turned on) so the mic doesn't hear it, then listen
-    if (afterCue && prefs.speak && cue) { document.getElementById('lstatus').textContent = 'Listen to your cue…'; speak(spokenText(cue.text), 1, () => phase === 'answer' && !listener && controls._start()); }
-    else setTimeout(() => phase === 'answer' && !listener && controls._start(), 250);
+    if (afterCue && prefs.speak && cue) { document.getElementById('lstatus').textContent = 'Listen to your cue…'; speak(spokenText(cue.text), 1, () => phase === 'answer' && useVoice && !listener && controls._start()); }
+    else setTimeout(() => phase === 'answer' && useVoice && !listener && controls._start(), 250);
   };
 
   const gradeNow = () => {
