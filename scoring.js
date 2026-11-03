@@ -177,3 +177,31 @@ export function evaluate(expectedText, attemptText, opts = {}) {
   const prefixWords = prefixTokens >= n ? E.words.length : (E.tokens[prefixTokens] ? E.tokens[prefixTokens].orig : E.words.length);
   return { correct, marks, matched: dp[0][0], total: n, saidWords: m, prefixWords, scriptWords: E.words, knownWords, misspelled };
 }
+
+// Which words differ between the script and an attempt, as readable phrases:
+// [{ want: "I'm", got: "I am" }, { want: "the", got: "" (skipped) }, { want: "", got: "really" (added) }]
+// Used to track the words you keep getting wrong.
+export function diffWords(expectedText, attemptText, opts = {}) {
+  const E = normalize(expectedText), A = normalize(attemptText);
+  const eq = makeEq(opts.speech ? 'speech' : 'type');
+  const a = E.tokens, b = A.tokens.map(x => x.norm);
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = eq(a[i], b[j]) ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const out = [];
+  let gapA = [], gapB = [];
+  const clean = (w) => w.replace(/^[^\w'’]+|[^\w'’]+$/g, '');
+  const phrase = (toks, words) => [...new Set(toks.map(t => t.orig))].map(o => clean(words[o])).join(' ');
+  const flush = () => {
+    if (gapA.length || gapB.length) out.push({ want: phrase(gapA, E.words), got: phrase(gapB, A.words) });
+    gapA = []; gapB = [];
+  };
+  let i = 0, j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && eq(a[i], b[j]) && dp[i][j] === dp[i + 1][j + 1] + 1) { flush(); i++; j++; }
+    else if (j < m && (i >= n || dp[i][j + 1] >= dp[i + 1][j])) { gapB.push(A.tokens[j]); j++; }
+    else { gapA.push(a[i]); i++; }
+  }
+  flush();
+  return out.filter(d => d.want.toLowerCase() !== d.got.toLowerCase());
+}

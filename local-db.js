@@ -67,6 +67,12 @@ export const getMeta = async (key) => (await getOne('meta', key))?.data;
 export const setMeta = (key, data) => putOne('meta', { key, data });
 
 const newId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+// Per-script plan: off-book date, review-only days, new lines per session
+const cleanSettings = (x = {}) => ({
+  deadline: /^\d{4}-\d{2}-\d{2}$/.test(x.deadline || '') ? x.deadline : null,
+  reviewOnly: !!x.reviewOnly,
+  newPerSession: Number.isInteger(x.newPerSession) && x.newPerSession >= 1 && x.newPerSession <= 30 ? x.newPerSession : null,
+});
 const cleanTitle = (t) => String(t || 'Untitled script').trim().slice(0, 120) || 'Untitled script';
 
 function validateData(d) {
@@ -101,7 +107,7 @@ function summary(row) {
   });
   return {
     id: row.id, title: row.title, myCharacters: [...mine],
-    lineCount: myLines.length, offBook, due, trouble,
+    lineCount: myLines.length, offBook, due, trouble, deadline: row.settings?.deadline || null,
     percent: myLines.length ? Math.round((masterySum / (myLines.length * 5)) * 100) : 0,
     updatedAt: row.updatedAt, lastPracticed: row.lastPracticed || null, createdAt: row.createdAt,
   };
@@ -169,10 +175,11 @@ export async function localApi(path, opts = {}) {
       return { ok: true };
     }
     const row = await mustGet(m[1]);
-    if (method === 'GET') return { id: row.id, title: row.title, data: row.data, myCharacters: row.myCharacters, progress: row.progress || {}, summary: summary(row) };
+    if (method === 'GET') return { id: row.id, title: row.title, data: row.data, myCharacters: row.myCharacters, progress: row.progress || {}, settings: row.settings || {}, summary: summary(row) };
     if (method === 'PUT') {
       if (body.title !== undefined) row.title = cleanTitle(body.title);
       if (Array.isArray(body.myCharacters)) row.myCharacters = body.myCharacters.map(String).slice(0, 20);
+      if (body.settings && typeof body.settings === 'object') row.settings = cleanSettings(body.settings);
       if (body.data) { const v = validateData(body.data); if (!v) throw new Error('Those changes could not be saved.'); row.data = v; }
       row.updatedAt = Date.now();
       await putOne('scripts', row);
@@ -220,7 +227,7 @@ export async function importAll(backup) {
     const data = validateData(s.data);
     if (!data || !s.id) continue;
     const existing = await getOne('scripts', s.id);
-    const incoming = { id: String(s.id), title: cleanTitle(s.title), data, myCharacters: (s.myCharacters || []).map(String), progress: s.progress || {}, createdAt: s.createdAt || Date.now(), updatedAt: s.updatedAt || Date.now(), lastPracticed: s.lastPracticed || null };
+    const incoming = { id: String(s.id), title: cleanTitle(s.title), data, myCharacters: (s.myCharacters || []).map(String), settings: cleanSettings(s.settings), progress: s.progress || {}, createdAt: s.createdAt || Date.now(), updatedAt: s.updatedAt || Date.now(), lastPracticed: s.lastPracticed || null };
     if (!existing) { await putOne('scripts', incoming); added++; continue; }
     // Keep whichever copy was practiced or edited most recently
     const stamp = (r) => Math.max(r.lastPracticed || 0, r.updatedAt || 0);

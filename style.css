@@ -356,3 +356,30 @@ code { background: var(--bg); border-radius: 4px; padding: 1px 5px; font-size: 1
 .idir::before { content: "("; } .idir::after { content: ")"; }
 .mine-box .idir, .ed-row.mine .idir { background: rgba(255,255,255,.7); }
 .ed-dir-btn { margin-bottom: 6px; }
+
+/* Plan card */
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; align-items: end; }
+.plan-grid .field { margin-bottom: 0; }
+.plan-grid input[type=date], .plan-grid select { width: 100%; padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font: inherit; background: #fff; color: var(--ink); }
+.scene-btns { gap: 6px; }
+@media (max-width: 640px) { .scene-btns .btn { flex: 1; } }
+
+/* Spot the Error */
+.line-text.spot { line-height: 2.1; }
+.spot-word { font: inherit; border: 1px solid transparent; background: none; padding: 0 3px; border-radius: 6px; color: var(--ink); cursor: pointer; }
+.spot-word:hover { border-color: var(--line-strong); background: var(--bg); }
+.spot-word.nope { color: var(--muted); text-decoration: line-through; cursor: default; animation: shake .3s; }
+@keyframes shake { 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
+
+/* Put It in Order */
+.order-placed { margin: 0; padding-left: 26px; display: grid; gap: 6px; }
+.order-placed li::marker { color: var(--brand-text); font-weight: 700; }
+.order-empty { list-style: none; margin-left: -26px; padding: 14px; border: 2px dashed var(--line-strong); border-radius: 12px; text-align: center; }
+.order-pool { display: grid; gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.order-card { display: block; width: 100%; text-align: left; font: inherit; background: #fff; border: 1px solid var(--line-strong); border-radius: 12px; padding: 8px 12px; cursor: pointer; }
+.order-card:hover { border-color: var(--brand); }
+.order-card.mine { background: var(--brand-soft); }
+.order-card .who { display: block; margin-bottom: 2px; }
+.order-card .order-text { white-space: pre-line; font-size: 15px; }
+.order-card.right { border: 2px solid var(--success); }
+.order-card.wrong { border: 2px solid var(--danger); background: var(--danger-soft); }

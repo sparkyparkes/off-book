@@ -168,7 +168,7 @@ async function mergeAll() {
     let localDirty = false;
     if ((R.updatedAt || 0) > (L.updatedAt || 0)) {
       const data = parseData(R.data);
-      if (data) { next = { ...next, title: R.title, myCharacters: R.myCharacters || [], data, updatedAt: R.updatedAt, createdAt: R.createdAt || L.createdAt }; localDirty = true; }
+      if (data) { next = { ...next, title: R.title, myCharacters: R.myCharacters || [], settings: R.settings || L.settings || {}, data, updatedAt: R.updatedAt, createdAt: R.createdAt || L.createdAt }; localDirty = true; }
     } else if ((L.updatedAt || 0) > (R.updatedAt || 0)) {
       writes.push(pushScriptDoc(L));
     }
@@ -195,7 +195,7 @@ const parseData = (s) => { try { return typeof s === 'string' ? JSON.parse(s) : 
 
 function fromRemote(id, R, RP) {
   return {
-    id, title: R.title || 'Untitled script', myCharacters: R.myCharacters || [], data: parseData(R.data) || { entries: [], scenes: [], characters: [] },
+    id, title: R.title || 'Untitled script', myCharacters: R.myCharacters || [], settings: R.settings || {}, data: parseData(R.data) || { entries: [], scenes: [], characters: [] },
     progress: RP?.progress || {}, progressResetAt: RP?.resetAt || 0,
     createdAt: R.createdAt || Date.now(), updatedAt: R.updatedAt || Date.now(), lastPracticed: RP?.lastPracticed || null,
   };
@@ -208,7 +208,7 @@ function pushScriptDoc(L) {
     return Promise.resolve();
   }
   return fb.setDoc(fb.doc(db, ...userPath('scripts', L.id)), {
-    title: L.title, myCharacters: L.myCharacters || [], data, createdAt: L.createdAt || Date.now(), updatedAt: L.updatedAt || Date.now(),
+    title: L.title, myCharacters: L.myCharacters || [], settings: L.settings || {}, data, createdAt: L.createdAt || Date.now(), updatedAt: L.updatedAt || Date.now(),
   });
 }
 function pushProgress(id, progress, lastPracticed, resetAt) {

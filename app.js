@@ -1,5 +1,6 @@
 import { parseScript, textToLines, pdfItemsToLines, ocrBlocksToLines, finalize } from './parser.js';
-import { evaluate } from './scoring.js';
+import { evaluate, diffWords } from './scoring.js';
+import { chunkLine, pacing, makeSpotError, spokenWords } from './plan.js';
 import { localApi, exportAll, importAll } from './local-db.js';
 import { renderEditor } from './editor.js';
 import { initSync, signIn, signOutUser, syncNow, syncState, onSyncChange, isConfigured } from './sync.js';
@@ -361,6 +362,7 @@ async function renderHome() {
             ${s.due ? `<span class="tag due">${s.due} to review</span>` : `<span class="tag done">All caught up</span>`}
             ${s.trouble ? `<span class="tag trouble">${s.trouble} trouble spot${s.trouble === 1 ? '' : 's'}</span>` : ''}
             <span class="tag">${s.offBook}/${s.lineCount} off book</span>
+            ${s.deadline ? `<span class="tag"><i class="fa-regular fa-calendar" aria-hidden="true"></i> Off book by ${new Date(s.deadline + 'T12:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>` : ''}
           </div>
         </div>`).join('')}
       <div class="card add-card" id="add-card"><div><div class="plus">+</div>Add a Script</div></div>
@@ -750,6 +752,8 @@ async function renderScript(id, tab = 'scenes') {
       </div>
     </div>
 
+    ${planCardHTML(script)}
+
     <div class="card" style="margin-top:16px">
       <h3>Practice style</h3>
       <div class="modes" id="modes">${MODES.map(m => `<button class="mode ${prefs.mode === m.id ? 'on' : ''}" data-m="${m.id}"><b>${m.name}</b><span>${m.desc}</span></button>`).join('')}</div>
@@ -777,6 +781,7 @@ async function renderScript(id, tab = 'scenes') {
   document.getElementById('smart').onclick = () => startSession(script, { kind: 'smart' });
   document.getElementById('trouble').onclick = () => startSession(script, { kind: 'trouble' });
   document.getElementById('roles').onclick = () => editRoles(script);
+  bindPlanCard(script, id, tab);
 
   const el = document.getElementById('tab');
   if (tab === 'scenes') {
@@ -788,18 +793,21 @@ async function renderScript(id, tab = 'scenes') {
       const ob = ls.filter(l => (script.progress[l.id]?.mastery || 0) >= 4).length;
       return `<div class="scene-row"><div><div class="t">${esc(sc.title || `Scene ${i + 1}`)}</div><div class="s">${ls.length} lines · ${ob} off book${tr ? ` · <span style="color:var(--danger)">${tr} trouble</span>` : ''}</div></div>
         <div><div class="mini-bar"><span style="width:${pct}%"></span></div><div class="s">${Math.round(pct)}% ready</div></div>
-        <div class="row"><button class="btn sm" data-run="${i}">Run Scene</button></div></div>`;
+        <div class="row scene-btns"><button class="btn sm" data-run="${i}">Run Scene</button><button class="btn sm ghost" data-pick="${i}" title="Your lines from this scene in random order, from memory"><i class="fa-solid fa-shuffle" aria-hidden="true"></i> Pickups</button><button class="btn sm ghost" data-order="${i}" title="Put the lines of this scene back in order"><i class="fa-solid fa-list-ol" aria-hidden="true"></i> In Order</button></div></div>`;
     }).join('') || '<div class="empty">None of your lines were found. Check your role under "change".</div>'}
     <div class="scene-row"><div><div class="t">Full run-through</div><div class="s">Every one of your lines, in order</div></div><div></div><div><button class="btn sm" data-run="all">Run It All</button></div></div></div>`;
     el.querySelectorAll('[data-run]').forEach(b => b.onclick = () => startSession(script, b.dataset.run === 'all' ? { kind: 'all' } : { kind: 'scene', scene: +b.dataset.run }));
+    el.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => startSession(script, { kind: 'scene', scene: +b.dataset.pick, pickups: true }));
+    el.querySelectorAll('[data-order]').forEach(b => b.onclick = () => renderOrderGame(script, +b.dataset.order));
   } else if (tab === 'trouble') {
     const tl = lines.filter(l => script.progress[l.id] && (script.progress[l.id].trouble || script.progress[l.id].misses)).sort((a, b) => troubleRank(script.progress[b.id]) - troubleRank(script.progress[a.id]));
-    el.innerHTML = tl.length ? `<div class="card" style="padding:4px 6px">${tl.map(l => {
+    el.innerHTML = wordsToWatchHTML(script) + (tl.length ? `<div class="card" style="padding:4px 6px">${tl.map(l => {
       const p = script.progress[l.id]; const { cue } = cueFor(script, l);
       return `<div class="trouble-item"><div><div class="cue">${cue ? `Cue — ${esc(cue.speaker)}: “${esc(spokenText(cue.text).slice(-80))}”` : 'Opening line'}</div><div class="txt">${richText(l.text)}</div>
-        <div class="small muted">${p.trouble ? '<span class="tag trouble">Trouble</span>' : '<span class="tag done">Fixed</span>'} Missed ${p.misses}× · Shaky ${p.hards}× · ${p.attempts} tries</div></div>
+        <div class="small muted">${p.trouble ? '<span class="tag trouble">Trouble</span>' : '<span class="tag done">Fixed</span>'} Missed ${p.misses}× · Shaky ${p.hards}× · ${p.attempts} tries${p.hints ? ` · ${p.hints} hint${p.hints === 1 ? '' : 's'}` : ''}</div></div>
         <button class="btn sm" data-line="${l.id}">Practice</button></div>`;
-    }).join('')}</div>` : '<div class="card empty">No trouble spots yet. Any line you miss or find shaky will show up here and come back more often.</div>';
+    }).join('')}</div>` : '<div class="card empty">No trouble spots yet. Any line you miss or find shaky will show up here and come back more often.</div>');
+    el.querySelectorAll('[data-wline]').forEach(b => b.onclick = () => startSession(script, { kind: 'lines', ids: [b.dataset.wline] }));
     el.querySelectorAll('[data-line]').forEach(b => b.onclick = () => startSession(script, { kind: 'lines', ids: [b.dataset.line] }));
   } else if (tab === 'map') {
     el.innerHTML = `<div class="card"><p class="muted small" style="margin-top:0">Each square is one of your lines, in script order. Darker = better known. Red outline = trouble spot. Click one to practice it.</p>
@@ -898,34 +906,96 @@ if (prefs.input === 'speak' && !CAN_LISTEN) prefs.input = 'type';
 // ---------------------------------------------------------------- PRACTICE SESSION
 let session = null;
 
+// ---------------------------------------------------------------- planning helpers
+const isLearned = (p) => !!p && (!!p.learnedAt || (p.mastery || 0) >= 3);
+const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
+function planFor(script) {
+  const lines = myLines(script), P = script.progress, t0 = startOfToday();
+  const learned = lines.filter(l => isLearned(P[l.id])).length;
+  const learnedToday = lines.filter(l => (P[l.id]?.learnedAt || 0) >= t0).length;
+  const set = script.settings || {};
+  const pace = pacing({ total: lines.length, learned, learnedToday, deadline: set.deadline });
+  const nextUp = lines.find(l => !isLearned(P[l.id])) || null;
+  return { set, pace, learned, learnedToday, nextUp, total: lines.length };
+}
+// How many new (never learned) lines to add to a Smart Review today
+function newLineBudget(script) {
+  const { set, pace } = planFor(script);
+  if (set.reviewOnly) return 0;
+  if (set.newPerSession) return set.newPerSession;
+  if (pace) return pace.status === 'done' ? 0 : Math.min(10, pace.todayRemaining);
+  return null; // no plan: use the default
+}
+// Long speeches and songs are learned in chunks, then linked back together
+const chunkCache = new WeakMap();
+const chunksFor = (line) => { if (!chunkCache.has(line)) chunkCache.set(line, chunkLine(line.text)); return chunkCache.get(line); };
+
 function buildQueue(script, cfg) {
   const lines = myLines(script);
   const P = script.progress;
   const now = Date.now();
-  let q;
+  let q, extras = [];
   if (cfg.kind === 'scene') q = lines.filter(l => l.scene === cfg.scene);
   else if (cfg.kind === 'all') q = lines;
   else if (cfg.kind === 'lines') q = lines.filter(l => cfg.ids.includes(l.id));
   else if (cfg.kind === 'trouble') q = lines.filter(l => P[l.id]?.trouble).sort((a, b) => troubleRank(P[b.id]) - troubleRank(P[a.id])).slice(0, 25);
   else {
-    // Smart review: trouble first, then overdue reviews, then a few new lines — all played in script order
-    const due = lines.filter(l => P[l.id] && P[l.id].due <= now).sort((a, b) => troubleRank(P[b.id]) - troubleRank(P[a.id]) || P[a.id].due - P[b.id].due);
-    const fresh = lines.filter(l => !P[l.id]);
-    // Each new line climbs the whole ladder in one session, so take a handful at a time
+    // Smart review: trouble first, then overdue reviews, then a few new lines in script order (never skipping ahead)
+    const due = lines.filter(l => P[l.id] && P[l.id].attempts && P[l.id].due <= now).sort((a, b) => troubleRank(P[b.id]) - troubleRank(P[a.id]) || P[a.id].due - P[b.id].due);
+    const fresh = lines.filter(l => !isLearned(P[l.id]) && !due.includes(l));
     const picked = [...due.slice(0, 15)];
-    picked.push(...fresh.slice(0, prefs.mode === 'auto' ? (picked.length ? 4 : 6) : Math.max(5, 25 - picked.length)));
-    if (!picked.length) picked.push(...lines.slice().sort((a, b) => (P[a.id]?.due || 0) - (P[b.id]?.due || 0)).slice(0, 15));
+    const budget = newLineBudget(script);
+    // Count new material in chunks: a long speech counts as several pieces
+    let room = budget ?? (prefs.mode === 'auto' ? (picked.length ? 4 : 6) : Math.max(5, 25 - picked.length));
+    for (const l of fresh) {
+      if (room <= 0) break;
+      picked.push(l);
+      room -= prefs.mode === 'auto' ? Math.max(1, chunksFor(l).length) : 1;
+    }
+    // Mixed review: a couple of older learned lines that aren't due yet, so earlier scenes don't fade
+    if (prefs.mode === 'auto') {
+      const older = lines.filter(l => isLearned(P[l.id]) && !picked.includes(l) && P[l.id].due > now)
+        .sort((a, b) => (P[a.id].lastSeen || 0) - (P[b.id].lastSeen || 0)).slice(0, picked.length >= 12 ? 1 : 2);
+      extras = older.map((l, i) => ({ line: l, requeued: 0, variety: i % 2 === 0 ? 'spot' : 'review' }));
+    }
+    if (!picked.length && !extras.length) picked.push(...lines.slice().sort((a, b) => (P[a.id]?.due || 0) - (P[b.id]?.due || 0)).slice(0, 15));
     const order = new Map(lines.map((l, i) => [l.id, i]));
     q = picked.slice(0, 25).sort((a, b) => order.get(a.id) - order.get(b.id));
   }
-  return q.map(l => ({ line: l, requeued: 0 }));
+  let items = q.map(l => ({ line: l, requeued: 0 }));
+  if (cfg.pickups) items = items.sort(() => Math.random() - 0.5); // random pickups: jump in anywhere
+  // Spread the mixed-review extras through the session
+  extras.forEach((x, i) => items.splice(Math.min(items.length, Math.round((i + 1) * items.length / (extras.length + 1))), 0, x));
+  if (prefs.mode === 'auto' && !cfg.pickups) items = expandChunks(script, items);
+  return items;
+}
+
+// Turn each not-yet-learned long speech into its chunks (learned one at a time) plus a final "link" card
+function expandChunks(script, items) {
+  const P = script.progress;
+  const out = [];
+  for (const it of items) {
+    const chunks = it.variety ? [] : chunksFor(it.line);
+    if (!chunks.length || isLearned(P[it.line.id])) { out.push(it); continue; }
+    chunks.forEach((text, k) => {
+      const id = `${it.line.id}#${k}`;
+      if (isLearned(P[id])) return; // learned in an earlier session
+      out.push({ line: it.line, requeued: 0, unit: { id, text, kind: 'chunk', index: k, total: chunks.length, cueText: k > 0 ? chunks[k - 1] : null } });
+    });
+    out.push({ line: it.line, requeued: 0, unit: { id: it.line.id, text: it.line.text, kind: 'link', total: chunks.length } });
+  }
+  return out;
 }
 
 function startSession(script, cfg) {
   const queue = buildQueue(script, cfg);
-  if (!queue.length) { toast('Nothing to practice', 'No lines matched. Try another scene.', '<i class="fa-regular fa-circle-question" aria-hidden="true"></i>'); return; }
+  if (!queue.length) {
+    const reviewOnly = script.settings?.reviewOnly;
+    toast('Nothing to practice', reviewOnly ? 'Review only is on and nothing is due. Turn it off in Plan to learn new lines.' : 'No lines matched. Try another scene.', '<i class="fa-regular fa-circle-question" aria-hidden="true"></i>');
+    return;
+  }
   const labels = { smart: 'Smart review', trouble: 'Trouble spots', all: 'Full run-through', lines: 'Line drill', scene: script.data.scenes[cfg.scene]?.title || 'Scene' };
-  session = { scriptId: script.id, cfg, label: labels[cfg.kind], queue, i: 0, unique: new Set(queue.map(q => q.line.id)).size, results: {}, combo: 0, bestCombo: 0, xp: 0, misses: 0, startMastery: stats(script).pct, fixed: 0 };
+  session = { scriptId: script.id, cfg, label: (cfg.pickups ? 'Pickups · ' : '') + labels[cfg.kind], queue, i: 0, unique: new Set(queue.map(q => q.line.id)).size, results: {}, combo: 0, bestCombo: 0, xp: 0, misses: 0, startMastery: stats(script).pct, fixed: 0, forceMode: cfg.pickups ? 'recall' : null, words: [], learnedNow: 0 };
   const target = `#/practice/${script.id}`;
   if (location.hash === target) router(); else location.hash = target;
 }
@@ -1084,21 +1154,33 @@ function drawCard(script) {
   if (s.i >= s.queue.length) return drawSummary(script);
   const item = s.queue[s.i];
   const line = item.line;
-  const p = script.progress[line.id];
-  const auto = prefs.mode === 'auto';
-  s.ladder ||= {};
-  const st = auto ? (s.ladder[line.id] ||= { step: startStep(p), start: startStep(p), shows: 0, read: false }) : null;
+  if (item.variety === 'spot') return drawSpot(script, item);
+  // What this card tests: a whole line, one chunk of a long speech, or the "link" (whole speech after its chunks)
+  const unit = item.unit || { id: line.id, text: line.text, kind: 'line' };
+  const T = unit.text, key = unit.id;
+  s.ladder ||= {}; s.doneUnits ||= new Set();
+  if (unit.kind === 'link') {
+    // Link the whole speech only after its chunks are done today
+    const pendingAt = s.queue.findLastIndex((q, j) => j > s.i && q.unit?.kind === 'chunk' && q.line.id === line.id);
+    if (pendingAt > s.i) { s.queue.splice(s.i, 1); s.queue.splice(pendingAt, 0, item); return drawCard(script); }
+  }
+  const p = script.progress[key];
+  const auto = prefs.mode === 'auto' && !s.forceMode;
+  const linkStart = unit.kind === 'link' ? Math.max(startStep(p), LADDER.indexOf('letters')) : null;
+  const st = auto ? (s.ladder[key] ||= { step: linkStart ?? startStep(p), start: linkStart ?? startStep(p), shows: 0, read: false }) : null;
   const stepKey = auto ? LADDER[st.step] : null;
-  const mode = auto ? STEP[stepKey].mode : modeFor(p);
-  // Brand-new lines get one read-through first, then go straight into the first fade step
-  const firstRead = auto && !st.read && (!p || !p.attempts) && st.step === 0;
-  const { cue, dir } = cueFor(script, line);
+  const mode = s.forceMode || (auto ? STEP[stepKey].mode : modeFor(p));
+  // Brand-new lines (or chunks) get one read-through first, then go straight into the first fade step
+  const firstRead = auto && unit.kind !== 'link' && !st.read && (!p || !p.attempts) && st.step === 0;
+  let { cue, dir } = cueFor(script, line);
+  if (unit.kind === 'chunk' && unit.index > 0) { cue = { speaker: `${line.speaker} (you, continued)`, text: unit.cueText }; dir = null; }
   const done = Object.keys(s.results).length;
   const frac = mode === 'fade' ? (auto ? STEP[stepKey].frac : ((p?.mastery || 0) >= 3 ? 0.75 : 0.45)) : 0;
-  const seed = line.id + ':' + (p?.attempts || 0);
+  const seed = key + ':' + (p?.attempts || 0);
   let useVoice = prefs.input === 'speak' && CAN_LISTEN;
-  const scriptWords = spokenText(line.text).split(/\s+/).filter(Boolean);
-  const revealed = new Set(); // script word positions given away by hints
+  const scriptWords = spokenText(T).split(/\s+/).filter(Boolean);
+  const revealed = new Set(); // script word positions given away by hints (whole word)
+  const letterHints = new Set(); // positions where only the first letter has been given
   const evalOpts = { speech: useVoice };
 
   $app.innerHTML = `
@@ -1111,7 +1193,7 @@ function drawCard(script) {
         ${CAN_LISTEN ? `<button class="btn sm input-switch" id="switch-input" title="Change how you answer" aria-label="${useVoice ? 'Switch to typing' : 'Switch to speaking'}">${useVoice ? '<i class="fa-regular fa-keyboard" aria-hidden="true"></i><span class="sw-label"> Switch to Typing</span>' : '<i class="fa-solid fa-microphone" aria-hidden="true"></i><span class="sw-label"> Switch to Speaking</span>'}</button>` : ''}
       </div>
       <div class="stage">
-        <span class="mode-pill">${auto ? `${firstRead ? 'New line' : STEP[stepKey].name} · step ${st.step + 1} of ${LADDER.length}` : MODE_NAMES[mode]}${p?.trouble ? ' · trouble spot' : ''}</span>
+        <span class="mode-pill">${unit.kind === 'chunk' ? `Part ${unit.index + 1} of ${unit.total} · ` : unit.kind === 'link' ? 'Putting it together · ' : ''}${item.variety === 'review' ? 'Quick review · ' : ''}${auto ? `${firstRead ? 'New' : STEP[stepKey].name} · step ${st.step + 1} of ${LADDER.length}` : MODE_NAMES[mode]}${p?.trouble ? ' · trouble spot' : ''}</span>
         <div class="small muted">${esc(script.data.scenes[line.scene]?.title || '')}</div>
         ${prefs.context && dir ? `<div class="ctx">${esc(dir.text)}</div>` : ''}
         <div class="cue-box"><div class="who">${cue ? esc(cue.speaker) + (script.myCharacters.includes(cue.speaker) ? ' (you)' : '') : 'Top of scene'} ${cue ? `<button class="speak-btn" id="say-cue" title="Hear cue" aria-label="Hear cue"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button>` : ''}</div><div class="cue-text">${cue ? richText(cue.text) : '<span class="muted">You speak first.</span>'}</div></div>
@@ -1142,7 +1224,7 @@ function drawCard(script) {
       : (document.getElementById('typed')?.value ?? lastAttempt ?? '');
     stopListening(); window.speechSynthesis?.cancel?.();
     // Switching to typing to fix what the mic misheard shouldn't count against you
-    if (useVoice) { wrongTries = Math.max(0, wrongTries - heardWrong); heardWrong = 0; lastWrongLen = 0; }
+    if (useVoice) { wrongTries = Math.max(0, wrongTries - heardWrong); heardWrong = 0; lastWrongLen = 0; for (let k = pendingWords.length - 1; k >= 0; k--) if (pendingWords[k].heard) pendingWords.splice(k, 1); }
     useVoice = !useVoice; evalOpts.speech = useVoice;
     prefs.input = useVoice ? 'speak' : 'type'; savePrefs();
     sw.innerHTML = useVoice ? '<i class="fa-regular fa-keyboard" aria-hidden="true"></i><span class="sw-label"> Switch to Typing</span>' : '<i class="fa-solid fa-microphone" aria-hidden="true"></i><span class="sw-label"> Switch to Speaking</span>';
@@ -1160,21 +1242,23 @@ function drawCard(script) {
 
   // What's visible while you answer
   const promptHTML = () => {
-    if (gaveUp) return `<div class="line-text">${richText(line.text)}</div>`;
-    if (revealed.size > 0) {
+    if (gaveUp) return `<div class="line-text">${richText(T)}</div>`;
+    if (revealed.size > 0 || letterHints.size > 0) {
       // Line skeleton: words you already have, hint words highlighted, blanks for the rest
-      const { knownWords } = evaluate(line.text, lastAttempt, evalOpts);
+      const { knownWords } = evaluate(T, lastAttempt, evalOpts);
+      const blankFor = (w) => `<span class="blank" style="width:${Math.min(8, Math.max(1.2, w.replace(/[^\w']/g, '').length * 0.5))}em"></span>`;
       const wordHTML = (w, k) => revealed.has(k) && !knownWords[k] ? `<span class="hint-words">${esc(w)}</span>`
         : knownWords[k] ? `<span class="known">${esc(w)}</span>`
+        : letterHints.has(k) ? `<span class="hint-words">${esc(w.match(/[A-Za-z0-9]/)?.[0] || w[0])}</span>${blankFor(w.slice(1))}`
         : `<span class="blank" style="width:${Math.min(8, Math.max(1.6, w.replace(/[^\w']/g, '').length * 0.55))}em"></span>`;
       // Walk the words in order, keeping line and stanza breaks where they are
       let k = 0;
       const spokenSeg = (seg) => seg.split(/(\s+)/).filter(Boolean).map(tok => /^\s+$/.test(tok) ? (tok.includes('\n') ? tok.replace(/[^\n]/g, '') : ' ') : wordHTML(tok, k++)).join('');
-      const parts = [richText(line.text, spokenSeg)];
+      const parts = [richText(T, spokenSeg)];
       return `<div class="line-text skeleton">${parts.join('')}</div>${hintNote ? `<div class="small" style="margin-top:6px;color:var(--brand-dark)">${hintNote}</div>` : ''}`;
     }
-    if (mode === 'fade') return `<div class="line-text">${fadeHTML(line.text, frac, seed)}</div>`;
-    if (mode === 'letters') return `<div class="line-text">${lettersHTML(line.text)}</div>`;
+    if (mode === 'fade') return `<div class="line-text">${fadeHTML(T, frac, seed)}</div>`;
+    if (mode === 'letters') return `<div class="line-text">${lettersHTML(T)}</div>`;
     return `<div class="line-text muted" style="font-size:16px">Your line is hidden…</div>`;
   };
   const drawPrompt = () => {
@@ -1191,36 +1275,41 @@ function drawCard(script) {
       ${final ? `<div class="small" style="margin-top:6px;color:var(--brand-dark)">Not quite yet${missing ? ` — ${missing} word${missing === 1 ? '' : 's'} missing or different` : ' — some extra words'}. Try again, or tap <b>Hint</b>.</div>` : ''}`;
   };
 
+  // Remember which words went wrong (for "Words to Watch"); words the mic misheard are dropped if you switch to typing
+  const pendingWords = [];
+  const noteWords = (attempt, heard) => { diffWords(T, attempt, evalOpts).forEach(d => pendingWords.push({ ...d, heard })); };
+
   const tryAttempt = (attempt, final) => {
     if (phase !== 'answer') return;
     lastAttempt = attempt;
-    const r = evaluate(line.text, attempt, evalOpts);
+    const r = evaluate(T, attempt, evalOpts);
     if (r.correct) return success(attempt);
     showFeedback(attempt, r, final);
-    if (revealed.size) { hintNote = ''; drawPrompt(); }
-    if (final && attempt.trim()) wrongTries++;
+    if (revealed.size || letterHints.size) { hintNote = ''; drawPrompt(); }
+    if (final && attempt.trim()) { wrongTries++; noteWords(attempt, false); }
     // When speaking: count a wrong try once you've said at least as many words as the line
-    if (!final && useVoice && r.saidWords >= r.total && r.saidWords - lastWrongLen >= r.total) { wrongTries++; heardWrong++; lastWrongLen = r.saidWords; }
+    if (!final && useVoice && r.saidWords >= r.total && r.saidWords - lastWrongLen >= r.total) { wrongTries++; heardWrong++; lastWrongLen = r.saidWords; noteWords(attempt, true); }
   };
 
   const giveHint = () => {
     // Jump straight to your first mistake: never spend a hint on words you've already got right
     const ta = document.getElementById('typed');
     if (ta) lastAttempt = ta.value;
-    const { knownWords } = evaluate(line.text, lastAttempt, evalOpts);
+    const { knownWords } = evaluate(T, lastAttempt, evalOpts);
     const k = scriptWords.findIndex((_, i) => !knownWords[i] && !revealed.has(i));
     if (k === -1) {
       hintNote = 'You have every word — remove the extra or out-of-order words marked in red.';
-      if (!revealed.size) { const fb = document.getElementById('feedback'); fb.insertAdjacentHTML('beforeend', `<div class="small" style="margin-top:6px;color:var(--brand-dark)">${hintNote}</div>`); hintNote = ''; }
+      if (!revealed.size && !letterHints.size) { const fb = document.getElementById('feedback'); fb.insertAdjacentHTML('beforeend', `<div class="small" style="margin-top:6px;color:var(--brand-dark)">${hintNote}</div>`); hintNote = ''; }
       else drawPrompt();
       if (ta) ta.focus();
       return;
     }
     hintClicks++; hintNote = '';
-    revealed.add(k);
+    // Small hint first (the word's first letter), then the whole word if you need it
+    if (letterHints.has(k)) revealed.add(k); else letterHints.add(k);
     drawPrompt();
     const hb = document.getElementById('hint');
-    hb.innerHTML = `<i class="fa-regular fa-lightbulb" aria-hidden="true"></i> Hint (${revealed.size} used)`;
+    hb.innerHTML = `<i class="fa-regular fa-lightbulb" aria-hidden="true"></i> Hint (${hintClicks} used)`;
     if (ta) ta.focus();
   };
 
@@ -1272,7 +1361,7 @@ function drawCard(script) {
       ta.addEventListener('input', () => {
         clearTimeout(settleTimer);
         lastAttempt = ta.value;
-        const r = evaluate(line.text, ta.value, evalOpts);
+        const r = evaluate(T, ta.value, evalOpts);
         if (r.correct) {
           const lastWordExact = !r.marks.length || !r.marks[r.marks.length - 1].spell;
           const wordFinished = /[\s.,!?;:'"”’)\]\-—]$/.test(ta.value);
@@ -1280,13 +1369,13 @@ function drawCard(script) {
           settleTimer = setTimeout(() => { if (phase === 'answer' && ta.value === lastAttempt) success(ta.value); }, 1800);
           return;
         }
-        if (revealed.size) drawPrompt();
+        if (revealed.size || letterHints.size) drawPrompt();
       });
       ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); tryAttempt(ta.value, true); } });
       document.getElementById('done').onclick = () => tryAttempt(ta.value, true);
     }
     document.getElementById('hint').onclick = giveHint;
-    if (revealed.size && !gaveUp) document.getElementById('hint').innerHTML = `<i class="fa-regular fa-lightbulb" aria-hidden="true"></i> Hint (${revealed.size} used)`;
+    if (hintClicks && !gaveUp) document.getElementById('hint').innerHTML = `<i class="fa-regular fa-lightbulb" aria-hidden="true"></i> Hint (${hintClicks} used)`;
     if (gaveUp) { const hb = document.getElementById('hint'); hb.disabled = true; hb.textContent = 'Full Line Shown'; document.getElementById('idk')?.remove(); }
     document.getElementById('idk').onclick = () => {
       // Shows the line; you still say/type it once to lock it in and move on
@@ -1308,7 +1397,11 @@ function drawCard(script) {
 
   const gradeNow = () => {
     // Automatic grade — based on hints, retries and how much of the line was visible
-    if (gaveUp || revealed.size >= Math.max(2, Math.ceil(scriptWords.length * 0.34))) return 0;
+    // A first-letter hint costs half as much as a whole word
+    const letterOnly = [...letterHints].filter(k => !revealed.has(k)).length;
+    const cost = revealed.size + letterOnly * 0.5;
+    if (gaveUp || cost >= Math.max(2, Math.ceil(scriptWords.length * 0.34))) return 0;
+    if (cost === 0.5 && !wrongTries && peeked <= 1) return 2; // one first-letter nudge: still "Got It"
     if (hintClicks > 0 || wrongTries > 0 || peeked > 1) return 1;
     if (mode === 'recall' && !peeked) return 3;
     return 2;
@@ -1317,7 +1410,7 @@ function drawCard(script) {
   // Misspellings don't cost you the line, but we point them out
   const spellNote = (attempt) => {
     if (useVoice) return '';
-    const { misspelled } = evaluate(line.text, attempt, evalOpts);
+    const { misspelled } = evaluate(T, attempt, evalOpts);
     if (!misspelled.length) return '';
     const clean = (w) => esc(w.replace(/^[^\w'’]+|[^\w'’]+$/g, ''));
     return `<div class="small" style="margin-top:8px">Right words! Spelling check: ${misspelled.map(m => `<span class="spell">${clean(m.typed)}</span> → <b>${clean(m.correct)}</b>`).join(', ')}</div>`;
@@ -1329,10 +1422,11 @@ function drawCard(script) {
     stopListening();
     const g = gradeNow();
     const G = GRADES[g];
-    const detail = gaveUp ? 'after seeing the line' : [wrongTries ? `${wrongTries + 1} tries` : 'first try', hintClicks ? `${hintClicks} hint${hintClicks === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
+    const letterOnly = [...letterHints].filter(k => !revealed.has(k)).length;
+    const detail = gaveUp ? 'after seeing the line' : [wrongTries ? `${wrongTries + 1} tries` : 'first try', letterOnly ? `${letterOnly} letter hint${letterOnly === 1 ? '' : 's'}` : '', revealed.size ? `${revealed.size} word hint${revealed.size === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
     mine.innerHTML = `${who}
       <div class="result-head"><span class="pill g${g}"><i class="fa-solid fa-check" aria-hidden="true"></i> ${G.label}</span><span class="muted small">${detail}</span></div>
-      <div class="line-text">${richText(line.text)}</div>
+      <div class="line-text">${richText(T)}</div>
       ${spellNote(attempt)}
       ${g === 2 && mode !== 'recall' && !hintClicks && !wrongTries ? '<div class="small muted" style="margin-top:6px">Some of the line was showing — get it from the cue alone to earn “Nailed it”.</div>' : ''}`;
     controls.innerHTML = `<div class="row"><span class="spacer"></span><span class="muted small" id="auto">Next line…</span><button class="btn primary" id="next">Next →</button></div>`;
@@ -1340,22 +1434,23 @@ function drawCard(script) {
     document.getElementById('next').onclick = next;
     record(g, document.getElementById('next'));
     // Give a little longer to read spelling notes
-    const hasSpell = !useVoice && evaluate(line.text, attempt, evalOpts).misspelled.length > 0;
+    const hasSpell = !useVoice && evaluate(T, attempt, evalOpts).misspelled.length > 0;
     advanceTimer = setTimeout(next, hasSpell ? 3500 : g >= 2 ? 1300 : 2200);
   };
 
   const record = (g, btn) => {
-    const prev = script.progress[line.id];
+    const prev = script.progress[key];
     const wasTrouble = prev?.trouble;
+    const again = (gap, extra = {}) => s.queue.splice(Math.min(s.queue.length, s.i + gap), 0, { line, requeued: item.requeued + 1, unit: item.unit, ...extra });
     let fixed = false, finished = true;
     if (auto && stepKey !== 'recall') {
-      // A supported step: move up (or back) the ladder and see the line again a few cards later
-      script.progress[line.id] = scaffoldUpdate(prev, g, STEP[stepKey].mastery);
+      // A supported step: move up (or back) the ladder and see it again a few cards later
+      script.progress[key] = scaffoldUpdate(prev, g, STEP[stepKey].mastery);
       st.shows++;
       if (g >= 2) st.step = Math.min(LADDER.length - 1, st.step + 1);
       else if (g === 0) st.step = Math.max(0, st.step - 1);
       finished = st.shows >= 8; // don't let one line take over the session
-      if (!finished) s.queue.splice(Math.min(s.queue.length, s.i + (LADDER[st.step] === 'recall' ? 5 : 3)), 0, { line, requeued: item.requeued + 1 });
+      if (!finished) again(LADDER[st.step] === 'recall' ? 5 : 3);
     } else {
       // The real test (from memory), or a practice style you picked yourself: normal spaced repetition
       const res = applyGrade(prev, g);
@@ -1365,15 +1460,43 @@ function drawCard(script) {
         res.p.mastery = Math.min(res.p.mastery, 3);
         res.p.due = Date.now() + DAY;
       }
-      script.progress[line.id] = res.p;
+      if (g >= 2 && !res.p.learnedAt) { res.p.learnedAt = Date.now(); if (unit.kind !== 'chunk') s.learnedNow++; }
+      script.progress[key] = res.p;
       if (auto) {
         st.shows++;
         if (g < 2 && st.shows < 8) {
           if (g === 0) st.step = LADDER.indexOf('letters'); // missed it: one step of help, then try again
-          s.queue.splice(Math.min(s.queue.length, s.i + 4), 0, { line, requeued: item.requeued + 1 });
+          again(4);
           finished = false;
+          // Long speech: first drill just the chunk where it went wrong, then the whole speech again
+          const chunks = unit.kind !== 'chunk' ? chunksFor(line) : [];
+          if (chunks.length) {
+            const { knownWords } = evaluate(T, lastAttempt, evalOpts);
+            const firstMiss = Math.max(0, knownWords.findIndex(x => !x));
+            let count = 0, ci = chunks.length - 1;
+            for (let c = 0; c < chunks.length; c++) { count += spokenWords(chunks[c]).length; if (firstMiss < count) { ci = c; break; } }
+            const cid = `${line.id}#${ci}`;
+            s.ladder[cid] = { step: LADDER.indexOf('letters'), start: LADDER.indexOf('letters'), shows: 0, read: true };
+            s.queue.splice(Math.min(s.queue.length, s.i + 2), 0, { line, requeued: item.requeued + 1, unit: { id: cid, text: chunks[ci], kind: 'chunk', index: ci, total: chunks.length, cueText: ci > 0 ? chunks[ci - 1] : null } });
+          }
         }
       }
+    }
+    // Hints used and words you got wrong, for the Trouble Spots page
+    if (hintClicks) script.progress[key].hints = (prev?.hints || 0) + hintClicks;
+    if (pendingWords.length) {
+      const W = script.progress._words ||= { lastSeen: 0, items: {} };
+      const lineId = line.id;
+      pendingWords.forEach(d => {
+        const k = `${d.want.toLowerCase()}→${d.got.toLowerCase()}`;
+        const it = W.items[k] ||= { want: d.want, got: d.got, count: 0, lineId };
+        it.count++; it.last = Date.now(); it.lineId = lineId;
+      });
+      // keep the list small: the 150 most recent
+      const keys = Object.keys(W.items);
+      if (keys.length > 150) keys.sort((x, y) => W.items[x].last - W.items[y].last).slice(0, keys.length - 150).forEach(k2 => delete W.items[k2]);
+      W.lastSeen = Date.now();
+      s.words.push(...pendingWords.filter(d => !d.heard || useVoice));
     }
     saveProgress(script);
     if (g >= 2) { s.combo++; s.bestCombo = Math.max(s.bestCombo, s.combo); } else s.combo = 0;
@@ -1388,15 +1511,17 @@ function drawCard(script) {
     if (s.combo && s.combo % 5 === 0) toast(`${s.combo}× combo!`, 'You\'re in the zone.', '<i class="fa-solid fa-bolt" aria-hidden="true"></i>');
     recordReview();
     if (auto) {
-      // Smart Mix: a line counts as done once you've said it from memory
-      if (finished) s.results[line.id] = Math.min(g, s.worst?.[line.id] ?? 3);
-      if (stepKey === 'recall' || g === 0) { s.worst ||= {}; s.worst[line.id] = Math.min(g, s.worst[line.id] ?? 3); }
+      s.worst ||= {};
+      if (stepKey === 'recall' || g === 0) s.worst[key] = Math.min(g, s.worst[key] ?? 3);
+      if (finished) s.doneUnits.add(key);
+      // Smart Mix: a line counts as done once you've said the whole thing from memory (chunks don't count on their own)
+      if (finished && unit.kind !== 'chunk') s.results[line.id] = Math.min(g, s.worst[key] ?? 3);
       return;
     }
     if (!(line.id in s.results) || g < s.results[line.id]) s.results[line.id] = g;
     // Lines you struggled with come back later in the same session
-    if (g === 0 && item.requeued < 2) s.queue.splice(Math.min(s.queue.length, s.i + 4), 0, { line, requeued: item.requeued + 1 });
-    else if (g === 1 && item.requeued < 1) s.queue.splice(Math.min(s.queue.length, s.i + 7), 0, { line, requeued: item.requeued + 1 });
+    if (g === 0 && item.requeued < 2) again(4);
+    else if (g === 1 && item.requeued < 1) again(7);
   };
 
   keyHandler = (e) => {
@@ -1408,15 +1533,197 @@ function drawCard(script) {
 
   if (mode === 'learn' || firstRead) {
     phase = 'learn';
-    mine.innerHTML = `${who}<div class="line-text">${richText(line.text)}</div>`;
+    mine.innerHTML = `${who}<div class="line-text">${richText(T)}</div>`;
     controls.innerHTML = `<div class="row"><span class="muted small">${firstRead ? 'New line: read it aloud with your cue, then try it with some words hidden.' : 'Read it aloud with your cue, then say it from memory.'}</span><span class="spacer"></span>
       <button class="btn ghost sm" id="hear" aria-label="Hear the line"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button><button class="btn primary" id="go">Test Me →</button></div>`;
-    document.getElementById('hear').onclick = () => speak(spokenText(line.text), 0.95);
+    document.getElementById('hear').onclick = () => speak(spokenText(T), 0.95);
     document.getElementById('go').onclick = () => { if (st) st.read = true; beginAnswer(false); };
     if (prefs.speak && cue) setTimeout(() => speak(spokenText(cue.text)), 250);
   } else {
     beginAnswer(true);
   }
+}
+
+// ---------------------------------------------------------------- plan card (deadline pacing)
+const fmtDay = (iso) => new Date(iso + 'T12:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+function planCardHTML(script) {
+  const { set, pace, learned, total, nextUp } = planFor(script);
+  let status;
+  if (set.reviewOnly) status = `<b>Review only is on</b> — no new lines will be added until you turn it off.`;
+  else if (!pace) status = `${learned} of ${total} lines learned. Set an off-book date and the app will pace new lines for you.`;
+  else if (pace.status === 'done') status = `<b>All ${total} lines learned</b> — reviews will keep them sharp until ${fmtDay(set.deadline)}.`;
+  else if (pace.status === 'late') status = `Your off-book date has passed — <b>${pace.left} line${pace.left === 1 ? '' : 's'}</b> still to learn.`;
+  else status = `<b>${pace.left}</b> line${pace.left === 1 ? '' : 's'} left · <b>${pace.days}</b> day${pace.days === 1 ? '' : 's'} to go · aim for <b>${pace.perDay}</b> new a day<br>
+    Today: ${pace.learnedToday} of ${pace.perDay} ${pace.status === 'today-done' ? '<span class="tag done">Done for today ✓</span> Extra practice is review.' : ''}`;
+  const sceneTitle = nextUp ? script.data.scenes[nextUp.scene]?.title : '';
+  const newOpts = [['', 'Auto'], ...[1, 2, 3, 4, 5, 6, 8, 10, 12, 15].map(n => [String(n), String(n)])];
+  return `<div class="card plan" style="margin-top:16px">
+    <h3>Plan</h3>
+    <div class="plan-grid">
+      <label class="field"><span>Off-book date</span><input type="date" id="pl-date" value="${esc(set.deadline || '')}"></label>
+      <label class="field"><span>New lines per session</span><select id="pl-new">${newOpts.map(([v, t]) => `<option value="${v}" ${String(set.newPerSession || '') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label class="toggle"><input type="checkbox" id="pl-review" ${set.reviewOnly ? 'checked' : ''}> Review only — no new lines</label>
+    </div>
+    <p class="small" style="margin:6px 0 0">${status}</p>
+    ${nextUp ? `<p class="small muted" style="margin:6px 0 0"><i class="fa-solid fa-forward" aria-hidden="true"></i> <b>Next up:</b> ${esc(sceneTitle || '')} — “${esc(spokenText(nextUp.text).split(/\s+/).slice(0, 10).join(' '))}${spokenWords(nextUp.text).length > 10 ? '…' : ''}”${chunksFor(nextUp).length ? ` <span class="tag">long speech · ${chunksFor(nextUp).length} parts</span>` : ''}</p>` : ''}
+  </div>`;
+}
+function bindPlanCard(script, id, tab) {
+  const save = async (patch) => {
+    const settings = { ...(script.settings || {}), ...patch };
+    await api(`/scripts/${script.id}`, { method: 'PUT', body: { settings } });
+    script.settings = settings;
+    renderScript(id, tab);
+  };
+  const d = document.getElementById('pl-date'), n = document.getElementById('pl-new'), r = document.getElementById('pl-review');
+  if (!d) return;
+  d.onchange = () => save({ deadline: d.value || null });
+  n.onchange = () => save({ newPerSession: n.value ? +n.value : null });
+  r.onchange = () => save({ reviewOnly: r.checked });
+}
+
+// ---------------------------------------------------------------- words you keep getting wrong
+const wordLabel = (w) => w.want && w.got ? `You said “${esc(w.got)}” — script: “${esc(w.want)}”` : w.want ? `You skipped “${esc(w.want)}”` : `You added “${esc(w.got)}”`;
+function wordsToWatchHTML(script) {
+  const items = Object.values(script.progress._words?.items || {}).filter(w => script.data.entries.some(e => e.id === w.lineId));
+  if (!items.length) return '';
+  items.sort((a, b) => b.count - a.count || b.last - a.last);
+  return `<div class="card" style="margin-bottom:12px"><h3>Words to Watch</h3><p class="muted small" style="margin-top:0">Wording you've gotten wrong when checking your answer — most frequent first.</p>
+    ${items.slice(0, 8).map(w => `<div class="trouble-item"><div><div class="txt">${wordLabel(w)}</div><div class="small muted">${w.count}× · in “${esc(spokenText(script.data.entries.find(e => e.id === w.lineId)?.text || '').split(/\s+/).slice(0, 8).join(' '))}…”</div></div><button class="btn sm" data-wline="${w.lineId}">Practice</button></div>`).join('')}</div>`;
+}
+function sessionWordsHTML(s) {
+  const seen = new Map();
+  (s.words || []).forEach(w => { const k = `${w.want}|${w.got}`.toLowerCase(); seen.set(k, { ...w, n: (seen.get(k)?.n || 0) + 1 }); });
+  if (!seen.size) return '';
+  return `<div class="card" style="margin-top:14px"><h3>Words to watch</h3>${[...seen.values()].slice(0, 6).map(w => `<div class="trouble-item"><div class="txt">${wordLabel(w)}${w.n > 1 ? ` <span class="muted small">(${w.n}×)</span>` : ''}</div></div>`).join('')}</div>`;
+}
+
+// ---------------------------------------------------------------- Spot the Error (quick review of a line you know)
+let vocabCache = { id: null, words: [] };
+function vocabFor(script) {
+  if (vocabCache.id !== script.id) {
+    const set = new Set();
+    script.data.entries.forEach(e => e.type === 'line' && spokenWords(e.text).forEach(w => { const c = w.toLowerCase().replace(/[^a-z']/g, ''); if (c.length >= 3) set.add(c); }));
+    vocabCache = { id: script.id, words: [...set] };
+  }
+  return vocabCache.words;
+}
+function drawSpot(script, item) {
+  const s = session, line = item.line;
+  const err = makeSpotError(line.text, vocabFor(script));
+  if (!err) { item.variety = 'review'; return drawCard(script); }
+  const { cue } = cueFor(script, line);
+  const done = Object.keys(s.results).length;
+  $app.innerHTML = `
+    <div class="practice">
+      <div class="p-top"><button class="btn ghost sm" id="quit" aria-label="End session"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button><div class="progress-line"><span style="width:${(done / s.unique) * 100}%"></span></div><span class="small muted">${done}/${s.unique}</span><span class="combo"></span></div>
+      <div class="stage">
+        <span class="mode-pill">Spot the Error · quick review</span>
+        <div class="small muted">${esc(script.data.scenes[line.scene]?.title || '')}</div>
+        <div class="cue-box"><div class="who">${cue ? esc(cue.speaker) : 'Top of scene'}</div><div class="cue-text">${cue ? richText(cue.text) : '<span class="muted">You speak first.</span>'}</div></div>
+        <div class="mine-box" id="mine"><div class="who">${esc(line.speaker)}</div>
+          <p class="small muted" style="margin:0 0 8px">One thing in your line has been changed. Tap the wrong word.</p>
+          <div class="line-text spot">${err.words.map((w, i) => `<button class="spot-word" data-i="${i}">${esc(w.text)}</button>`).join(' ')}</div>
+        </div>
+        <div id="controls"></div>
+      </div>
+    </div>`;
+  let tries = 0, over = false, advance = null;
+  const finish = (g) => {
+    over = true;
+    const G = GRADES[g];
+    document.getElementById('mine').innerHTML = `<div class="who">${esc(line.speaker)}</div>
+      <div class="result-head"><span class="pill g${g}">${g ? '<i class="fa-solid fa-check" aria-hidden="true"></i> ' : ''}${g === 2 ? 'Found It' : g === 1 ? 'Found It (2nd try)' : 'Missed It'}</span></div>
+      <div class="said">${err.words.map(w => `<span class="${w.wrong ? 'bad' : 'ok'}">${esc(w.text)}</span>`).join(' ')}</div>
+      <div class="line-text" style="margin-top:8px">${richText(line.text)}</div>
+      <div class="small muted" style="margin-top:6px">It should be “${esc(err.fix)}”.</div>`;
+    document.getElementById('controls').innerHTML = `<div class="row"><span class="spacer"></span><button class="btn primary" id="next">Next →</button></div>`;
+    const next = () => { clearTimeout(advance); s.i++; drawCard(script); };
+    document.getElementById('next').onclick = next;
+    // Recognition is easier than recall: a miss brings the line's next real review forward, a hit doesn't change its schedule
+    if (g === 0 && script.progress[line.id]) { script.progress[line.id].due = Date.now(); saveProgress(script); }
+    s.results[line.id] = Math.min(g, s.results[line.id] ?? 3);
+    const xp = G.xp; s.xp += xp; addXP(xp, document.getElementById('next'));
+    recordReview();
+    advance = setTimeout(next, g ? 2600 : 4000);
+  };
+  document.querySelectorAll('.spot-word').forEach(b => b.onclick = () => {
+    if (over) return;
+    if (err.words[+b.dataset.i].wrong) return finish(tries === 0 ? 2 : 1);
+    tries++; b.classList.add('nope'); b.disabled = true;
+    if (tries >= 2) finish(0);
+  });
+  document.getElementById('quit').onclick = () => { clearTimeout(advance); if (Object.keys(s.results).length || s.xp) drawSummary(script); else location.hash = `#/script/${script.id}`; };
+}
+
+// ---------------------------------------------------------------- Put It in Order
+function renderOrderGame(script, sceneIdx) {
+  const mine = new Set(script.myCharacters);
+  const all = script.data.entries.filter(e => e.type === 'line' && e.scene === sceneIdx && spokenText(e.text));
+  if (all.length < 3) { toast('Not enough lines', 'This scene needs at least 3 lines to play.', '<i class="fa-regular fa-circle-question" aria-hidden="true"></i>'); return; }
+  // Up to 3 rounds of 4–5 consecutive lines, each including at least one of yours
+  const size = Math.min(5, all.length);
+  const starts = [];
+  for (let i = 0; i + size <= all.length; i++) if (all.slice(i, i + size).some(e => mine.has(e.speaker))) starts.push(i);
+  if (!starts.length) starts.push(0);
+  const picks = [...new Set([0, Math.floor(starts.length / 2), starts.length - 1].map(k => starts[k]))].slice(0, 3);
+  const rounds = picks.map(i => all.slice(i, i + size));
+  let r = 0, correctRounds = 0, firstTry = true;
+  const shuffle = (a) => { const b = a.slice(); do { b.sort(() => Math.random() - 0.5); } while (b.length > 1 && b.every((x, i) => x === a[i])); return b; };
+  let pool, placed, checked;
+  const startRound = () => { pool = shuffle(rounds[r]); placed = []; checked = null; firstTry = true; draw(); };
+  const cardHTML = (e, attrs, cls = '') => `<button class="order-card ${cls} ${mine.has(e.speaker) ? 'mine' : ''}" ${attrs}><span class="who">${esc(e.speaker)}</span><span class="order-text">${richText(e.text.length > 220 ? e.text.slice(0, 220) + '…' : e.text)}</span></button>`;
+  const draw = () => {
+    $app.innerHTML = `
+      <div class="practice">
+        <div class="p-top"><button class="btn ghost sm" id="o-quit" aria-label="Back to script"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button><div class="progress-line"><span style="width:${(r / rounds.length) * 100}%"></span></div><span class="small muted">Round ${r + 1} of ${rounds.length}</span></div>
+        <div class="stage">
+          <span class="mode-pill">Put It in Order</span>
+          <div class="small muted">${esc(script.data.scenes[sceneIdx]?.title || '')}</div>
+          <p class="small" style="margin:0">Tap the lines in the order they're spoken. Tap a placed line to send it back.</p>
+          <ol class="order-placed">${placed.map((e, i) => `<li>${cardHTML(e, `data-back="${i}"`, checked ? (checked[i] ? 'right' : 'wrong') : '')}</li>`).join('') || '<li class="order-empty muted small">Your order will build here…</li>'}</ol>
+          <div class="order-pool">${pool.map((e, i) => cardHTML(e, `data-take="${i}"`)).join('')}</div>
+          <div class="row" id="o-ctrl"></div>
+        </div>
+      </div>`;
+    document.getElementById('o-quit').onclick = () => renderScript(script.id, 'scenes');
+    document.querySelectorAll('[data-take]').forEach(b => b.onclick = () => { checked = null; placed.push(pool.splice(+b.dataset.take, 1)[0]); draw(); });
+    document.querySelectorAll('[data-back]').forEach(b => b.onclick = () => { checked = null; pool.push(placed.splice(+b.dataset.back, 1)[0]); draw(); });
+    const ctrl = document.getElementById('o-ctrl');
+    if (!pool.length) {
+      ctrl.innerHTML = `<span class="spacer"></span>${checked ? '<button class="btn ghost" id="o-show">Show Answer</button><button class="btn" id="o-retry">Try Again</button>' : '<button class="btn primary" id="o-check">Check</button>'}`;
+      const ck = document.getElementById('o-check');
+      if (ck) ck.onclick = () => {
+        checked = placed.map((e, i) => e === rounds[r][i]);
+        if (checked.every(Boolean)) {
+          if (firstTry) correctRounds++;
+          const xp = firstTry ? 12 : 5; addXP(xp, ck); recordReview();
+          toast(firstTry ? 'Perfect order!' : 'Got it in order', '', '<i class="fa-solid fa-list-ol" aria-hidden="true"></i>');
+          setTimeout(() => { r++; if (r < rounds.length) startRound(); else finishGame(); }, 900);
+          draw();
+          return;
+        }
+        firstTry = false; draw();
+      };
+      const retry = document.getElementById('o-retry');
+      if (retry) retry.onclick = () => { // keep the ones already in the right place
+        const keep = []; placed.forEach((e, i) => { if (checked[i] && placed.slice(0, i).every((x, j) => checked[j])) keep.push(e); else pool.push(e); });
+        placed = keep; checked = null; draw();
+      };
+      const show = document.getElementById('o-show');
+      if (show) show.onclick = () => { placed = rounds[r].slice(); pool = []; checked = placed.map(() => true); draw(); setTimeout(() => { r++; if (r < rounds.length) startRound(); else finishGame(); }, 2500); };
+    }
+  };
+  const finishGame = () => {
+    saveProfile.flush();
+    if (correctRounds === rounds.length) confetti(70);
+    $app.innerHTML = `<div class="practice"><div class="card summary"><div class="muted small">Put It in Order complete</div><div class="big">${correctRounds === rounds.length ? 'Perfect!' : 'Nice work'}</div>
+      <p>You put <b>${correctRounds} of ${rounds.length}</b> exchanges in order on the first try.</p>
+      <div class="row" style="justify-content:center;margin-top:12px"><button class="btn" id="o-back">Back to Script</button><button class="btn primary" id="o-again">Play Again</button></div></div></div>`;
+    document.getElementById('o-back').onclick = () => renderScript(script.id, 'scenes');
+    document.getElementById('o-again').onclick = () => renderOrderGame(script, sceneIdx);
+  };
+  startRound();
 }
 
 function drawSummary(script) {
@@ -1450,12 +1757,13 @@ function drawSummary(script) {
           <div class="stat"><b>${ids.length}</b><span>lines practiced</span></div>
           <div class="stat"><b>${Math.round(clean * 100)}%</b><span>clean</span></div>
           <div class="stat"><b>+${s.xp}</b><span>XP earned</span></div>
-          <div class="stat"><b>${s.bestCombo}×</b><span>best combo</span></div>
+          <div class="stat"><b>${s.learnedNow ? s.learnedNow : s.bestCombo + '×'}</b><span>${s.learnedNow ? `new line${s.learnedNow === 1 ? '' : 's'} learned` : 'best combo'}</span></div>
         </div>
         <p>Script readiness <b>${Math.round(s.startMastery)}% → ${Math.round(after.pct)}%</b>${s.fixed ? ` · fixed <b>${s.fixed}</b> trouble spot${s.fixed === 1 ? '' : 's'}` : ''}</p>
         <div class="mastery-bar" style="max-width:420px;margin:10px auto">${after.counts.map((c, i) => c ? `<span style="width:${(c / after.total) * 100}%;background:var(--m${i})"></span>` : '').join('')}</div>
       </div>
       ${shaky.length ? `<div class="card" style="margin-top:14px"><h3>Lines to watch</h3><p class="muted small" style="margin-top:0">These are now trouble spots and will come back sooner.</p>${shaky.map(l => `<div class="trouble-item"><div class="txt">${richText(l.text)}</div></div>`).join('')}</div>` : ''}
+      ${sessionWordsHTML(s)}
       <div class="row" style="justify-content:center;margin-top:18px">
         <a class="btn" href="#/script/${script.id}">Back to Script</a>
         ${shaky.length ? '<button class="btn" id="again-shaky">Drill These Again</button>' : ''}
