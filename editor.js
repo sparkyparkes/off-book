@@ -147,6 +147,25 @@ export function renderEditor(el, script, ctx) {
     return before || [...mine()][0] || last || characters()[0]?.[0] || 'CHARACTER';
   };
 
+  // Merge works across kinds: a stage direction joins a line as a [direction] inside it;
+  // two lines become one (kept under the first speaker); scene headings only merge with scene headings.
+  const canMerge = (a, b) => !!b && ((a.type === 'scene') === (b.type === 'scene'));
+  const mergeHint = (a, b) => {
+    if (a.type === 'scene') return 'Joins the two scene headings into one.';
+    if (a.type === 'line' && b.type === 'line') return a.speaker === b.speaker ? 'Joins the two lines into one.' : `Joins the next line into this one, spoken by ${a.speaker}.`;
+    if (a.type === 'dir' && b.type === 'dir') return 'Joins the two stage directions into one.';
+    return 'Puts the stage direction inside the line, in [brackets].';
+  };
+  const mergeEntries = (a, b) => {
+    const join = (x, y) => (x.replace(/\s+$/, '') + (/\n\s*$/.test(x) || !x.trim() ? '' : ' ') + y.replace(/^\s+/, '')).trim();
+    const bracket = (t) => `[${t.replace(/^\[|\]$/g, '').trim()}]`;
+    if (a.type === 'scene') return { ...a, text: `${a.text} · ${b.text}` };
+    if (a.type === 'line' && b.type === 'line') return { ...a, text: join(a.text, b.text) };
+    if (a.type === 'dir' && b.type === 'dir') return { ...a, text: join(a.text, b.text) };
+    if (a.type === 'line' && b.type === 'dir') return { ...a, text: join(a.text, bracket(b.text)) };
+    return { ...b, text: join(bracket(a.text), b.text) }; // direction then line: the line keeps its id (and your progress)
+  };
+
   const rowHTML = (e, i) => {
     const isMine = e.type === 'line' && mine().has(e.speaker);
     const head = e.type === 'line' ? `<div class="who">${esc(e.speaker || '?')}</div>` : '';
@@ -163,7 +182,7 @@ export function renderEditor(el, script, ctx) {
         <div class="ed-menu-wrap"><button class="btn sm" data-act="below">${I('fa-solid fa-arrow-turn-down')} Insert Below</button></div>
         <button class="btn sm" data-act="up" ${i === 0 ? 'disabled' : ''} title="Move up" aria-label="Move up">${I('fa-solid fa-arrow-up')}</button>
         <button class="btn sm" data-act="down" ${i === draft.length - 1 ? 'disabled' : ''} title="Move down" aria-label="Move down">${I('fa-solid fa-arrow-down')}</button>
-        ${draft[i + 1] && draft[i + 1].type === e.type && (e.type !== 'line' || draft[i + 1].speaker === e.speaker) ? `<button class="btn sm" data-act="merge" title="Join with the next entry">${I('fa-solid fa-link')} Merge With Next</button>` : ''}
+        ${canMerge(e, draft[i + 1]) ? `<button class="btn sm" data-act="merge" title="${esc(mergeHint(e, draft[i + 1]))}">${I('fa-solid fa-link')} Merge With Next</button>` : ''}
         <span class="spacer"></span>
         <button class="btn sm danger" data-act="delete">${I('fa-regular fa-trash-can')} Delete</button>
         <button class="btn sm primary" data-act="done">Done</button>
@@ -247,7 +266,14 @@ export function renderEditor(el, script, ctx) {
         pushUndo(); [draft[i], draft[j]] = [draft[j], draft[i]]; scheduleSave(); draw();
       }
       if (act === 'merge') {
-        pushUndo(); e.text = `${e.text} ${draft[i + 1].text}`.trim(); draft.splice(i + 1, 1); scheduleSave(); draw('.ed-input');
+        const next = draft[i + 1];
+        if (!canMerge(e, next)) return;
+        pushUndo();
+        const merged = mergeEntries(e, next);
+        draft.splice(i, 2, merged);
+        selected = merged.id;
+        scheduleSave(); draw('.ed-input');
+        toast('Merged', mergeHint(e, next), I('fa-solid fa-link'));
       }
       if (act === 'delete') {
         pushUndo(); draft.splice(i, 1); selected = null; scheduleSave(300); draw();
