@@ -91,6 +91,7 @@ export function carryIds(oldEntries, fresh) {
 // ---------------------------------------------------------------- UI
 export function renderEditor(el, script, ctx) {
   const { esc, toast, modal, confirmBox, titleCase, save } = ctx;
+  const rich = ctx.richText || esc;
   let draft = ensureSceneEntries(script.data);
   let selected = null;
   const undo = [];
@@ -123,7 +124,7 @@ export function renderEditor(el, script, ctx) {
         <span class="spacer"></span>
         <span class="muted small" id="ed-status"></span>
       </div>
-      <p class="muted small" style="margin:8px 0 12px">Tap any line to edit it, change who says it, move it, or insert something above or below. Press Return for a new line (for lyrics and poetry) and leave a blank line for a new stanza. Changes save automatically, and your progress stays with each line.</p>
+      <p class="muted small" style="margin:8px 0 12px">Tap any line to edit it, change who says it, move it, or insert something above or below. Press Return for a new line (for lyrics and poetry) and leave a blank line for a new stanza. Put stage directions inside a line in [square brackets] — they're shown while you practice but never tested. Changes save automatically, and your progress stays with each line.</p>
       <datalist id="ed-names"></datalist>
       <div class="ed-list" id="ed-list"></div>
       <div class="ed-add">
@@ -149,12 +150,13 @@ export function renderEditor(el, script, ctx) {
   const rowHTML = (e, i) => {
     const isMine = e.type === 'line' && mine().has(e.speaker);
     const head = e.type === 'line' ? `<div class="who">${esc(e.speaker || '?')}</div>` : '';
-    const body = e.text ? esc(e.text) : '<span class="muted">(empty)</span>';
+    const body = e.text ? (e.type === 'line' ? rich(e.text) : esc(e.text)) : '<span class="muted">(empty)</span>';
     if (selected !== e.id) return `<div class="ed-row ${e.type} ${isMine ? 'mine' : ''}" data-i="${i}">${head}<div class="ed-text">${body}</div></div>`;
     return `<div class="ed-row ${e.type} ${isMine ? 'mine' : ''} open" data-i="${i}">
       <div class="ed-types">${['line', 'dir', 'scene'].map(t => `<button class="seg ${e.type === t ? 'on' : ''}" data-type="${t}">${TYPE_LABEL[t]}</button>`).join('')}</div>
       ${e.type === 'line' ? `<label class="ed-field"><span>Spoken by</span><input type="text" class="ed-speaker" list="ed-names" value="${esc(e.speaker || '')}" autocomplete="off" placeholder="Character name"></label>` : ''}
-      <label class="ed-field"><span>${e.type === 'line' ? 'Words' : e.type === 'dir' ? 'Direction' : 'Scene name'}</span>
+      <label class="ed-field"><span>${e.type === 'line' ? 'Words — put stage directions inside the line in [square brackets]' : e.type === 'dir' ? 'Direction' : 'Scene name'}</span>
+        ${e.type === 'line' ? `<button class="btn sm ed-dir-btn" type="button" title="Add a stage direction inside this line">${I('fa-solid fa-person-walking')} Add Direction</button>` : ''}
         <textarea class="ed-input" rows="${e.type === 'scene' ? 1 : Math.min(14, Math.max(3, (e.text.match(/\n/g) || []).length + 2))}" placeholder="${e.type === 'line' ? 'Type the line exactly as written…' : e.type === 'dir' ? 'e.g. She slams the door.' : 'e.g. ACT II, SCENE 1'}">${esc(e.text)}</textarea></label>
       <div class="ed-actions">
         <div class="ed-menu-wrap"><button class="btn sm" data-act="above">${I('fa-solid fa-arrow-turn-up')} Insert Above</button></div>
@@ -205,6 +207,23 @@ export function renderEditor(el, script, ctx) {
     let typedUndo = false;
     input.addEventListener('focus', () => { if (!typedUndo) { pushUndo(); typedUndo = true; } });
     input.addEventListener('input', () => { e.text = input.value; scheduleSave(); });
+    // Wrap the selected words in [brackets], or drop in an empty [ ] at the cursor
+    const dirBtn = row.querySelector('.ed-dir-btn');
+    if (dirBtn) {
+      dirBtn.addEventListener('mousedown', (ev) => ev.preventDefault()); // keep the text selection
+      dirBtn.onclick = (ev) => {
+        ev.preventDefault();
+        if (!typedUndo) { pushUndo(); typedUndo = true; }
+        const a = input.selectionStart ?? input.value.length, b = input.selectionEnd ?? a;
+        const sel = input.value.slice(a, b).trim();
+        const before = input.value.slice(0, a), after = input.value.slice(b);
+        const padL = before && !/\s$/.test(before) ? ' ' : '', padR = after && !/^\s/.test(after) ? ' ' : '';
+        input.value = `${before}${padL}[${sel}]${padR}${after}`;
+        const caret = before.length + padL.length + 1 + sel.length;
+        input.focus(); input.setSelectionRange(sel ? caret + 1 : caret, sel ? caret + 1 : caret);
+        e.text = input.value; scheduleSave();
+      };
+    }
     if (sp) {
       sp.addEventListener('focus', () => { if (!typedUndo) { pushUndo(); typedUndo = true; } });
       sp.addEventListener('input', () => { e.speaker = sp.value.toUpperCase().replace(/\s+/g, ' ').trim(); scheduleSave(); });
@@ -279,7 +298,7 @@ export function renderEditor(el, script, ctx) {
   el.querySelector('#ed-text').onclick = () => {
     modal.open(`<h2>Edit as Text</h2>
       <p class="muted small" style="margin-top:0">
-      <code># ACT I, SCENE 1</code> starts a scene · <code>[She exits.]</code> is a stage direction · <code>NAME: words</code> starts a line.<br>
+      <code># ACT I, SCENE 1</code> starts a scene · <code>[She exits.]</code> is a stage direction · <code>NAME: words</code> starts a line. Inside a line, <code>[looks away]</code> is a direction that's shown but not tested.<br>
       Lines underneath without a name continue the same speech, keeping your line breaks — leave a blank line between them for a new stanza (great for songs).<br>
       Lines you don't change keep their progress.</p>
       <textarea id="tx-all" spellcheck="false" style="min-height:50vh;font-family:ui-monospace,Menlo,monospace;font-size:13px">${esc(toText(draft))}</textarea>

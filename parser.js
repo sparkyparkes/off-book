@@ -86,9 +86,10 @@ export function parseScript(rawLines) {
   let speaker = null; // currently open dialogue speaker (caps style)
   let current = null; // current line entry being built
   let lastLine = null; // the speech that just ended at a blank line (may continue as the next stanza of a song)
+  let pendingDir = ''; // a (parenthetical) under a character name, before their first words
 
   const endLine = () => { speaker = null; current = null; };
-  const newLine = (who, text, x) => { lastLine = null; current = { type: 'line', speaker: who, text: '', _rows: [], scene }; addRow(text, x); entries.push(current); return current; };
+  const newLine = (who, text, x) => { lastLine = null; current = { type: 'line', speaker: who, text: '', _rows: [], scene }; addRow((pendingDir ? pendingDir + ' ' : '') + text, x); pendingDir = ''; entries.push(current); return current; };
   const addRow = (text, x) => { const t = cleanDialogue(text); if (t) current._rows.push({ t, x }); };
 
   // Songs & poems: after a blank line, a following verse-like paragraph continues the same speech as a new stanza
@@ -122,8 +123,7 @@ export function parseScript(rawLines) {
       if (m && (style === 'colon' ? isSpeakerTag(m[1]) : isCapsName(m[1]))) {
         closeDir();
         const body = (style === 'colon' ? m[3] : m[2]) || '';
-        newLine(normalizeName(m[1]), body, l.x);
-        if (style === 'colon' && m[2]) current.note = m[2];
+        newLine(normalizeName(m[1]), (style === 'colon' && m[2] ? `(${m[2]}) ` : '') + body, l.x);
         speaker = current.speaker;
         continue;
       }
@@ -146,12 +146,12 @@ export function parseScript(rawLines) {
       if (next && !next.blank && !isCapsName(next.text)) {
         closeDir();
         speaker = normalizeName(t);
-        current = null; lastLine = null;
+        current = null; lastLine = null; pendingDir = '';
         continue;
       }
     }
     if (speaker) {
-      if (/^\(.*\)$/.test(t)) continue; // parenthetical like (beat)
+      if (/^\(.*\)$/.test(t)) { if (current) addRow(t, l.x); else pendingDir = (pendingDir + ' ' + t).trim(); continue; } // (beat), (dry): kept as a direction inside the line
       if (!current) newLine(speaker, t, l.x);
       else addRow(t, l.x);
       continue;
@@ -169,6 +169,7 @@ const STARTS_CAP = /^["'“‘(¿¡]?[A-Z0-9]/;
 // Does this speech look like verse (song lyrics, poetry) rather than wrapped prose?
 // Prose wraps fill the line almost to the edge; verse lines are uneven and usually start with a capital.
 export function isVerseRows(rows) {
+  rows = rows.filter(r => r.stanza || !/^\[[^\]]*\]$/.test(r.t)); // ignore rows that are only a [direction]
   const real = rows.filter(r => !r.stanza);
   if (real.length < 2) return false;
   const stanzas = rows.some(r => r.stanza);
@@ -198,8 +199,8 @@ export function tidyText(t) {
 }
 
 function cleanDialogue(t) {
-  // Parentheticals like (singing), (beat), (to Tom) are acting notes, not words you say
-  return t.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  // Parentheticals like (singing), (beat), (to Tom) become [stage directions] inside the line: shown, never tested
+  return t.replace(/\(([^)]*)\)/g, (m, x) => x.trim() ? `[${x.trim()}]` : ' ').replace(/\s+/g, ' ').trim();
 }
 
 // Shared: assign ids, merge tiny scenes, compute characters.

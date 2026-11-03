@@ -88,7 +88,7 @@ function validateData(d) {
 function summary(row) {
   const mine = new Set(row.myCharacters || []);
   const progress = row.progress || {};
-  const myLines = (row.data?.entries || []).filter(e => e.type === 'line' && mine.has(e.speaker));
+  const myLines = (row.data?.entries || []).filter(e => e.type === 'line' && mine.has(e.speaker) && String(e.text || '').replace(/\[[^\]]*\]?/g, '').trim());
   let masterySum = 0, offBook = 0, due = 0, trouble = 0;
   const now = Date.now();
   myLines.forEach(l => {

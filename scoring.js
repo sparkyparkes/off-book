@@ -20,6 +20,7 @@ const SAME_WORD = { mr: 'mister', mrs: 'missus', dr: 'doctor', ok: 'okay', st: '
 // Returns { tokens: [{ norm, orig }], words: original words }
 export function normalize(text) {
   const words = String(text || '')
+    .replace(/\[[^\]]*\]?/g, ' ')    // [stage directions] inside a line are shown, not spoken
     .replace(/[’‘`]/g, "'")
     .replace(/(\w)-(\w)/g, '$1$2')   // good-bye = goodbye (hyphen is punctuation)
     .replace(/[—–-]+/g, ' ')         // dashes between words

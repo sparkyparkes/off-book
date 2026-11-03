@@ -13,6 +13,19 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<'
 const todayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const titleCase = (s) => String(s).toLowerCase().replace(/\b([a-z])/g, m => m.toUpperCase());
 
+// ---- Stage directions inside a line, written in [square brackets]: shown, never memorized or scored
+const DIR_RE = /\[[^\]]*\]?/g;
+function splitDirs(text) {
+  const out = []; let last = 0; const t = String(text || '');
+  t.replace(DIR_RE, (m, off) => { if (off > last) out.push({ t: t.slice(last, off) }); out.push({ t: m.replace(/^\[|\]$/g, '').trim(), dir: true }); last = off + m.length; return m; });
+  if (last < t.length) out.push({ t: t.slice(last) });
+  return out;
+}
+const spokenText = (t) => String(t || '').replace(DIR_RE, ' ').split('\n').map(l => l.replace(/[ \t]+/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+const dirHTML = (t) => t ? `<span class="idir">${esc(t)}</span>` : '';
+// Render a line: spoken parts go through fn (plain, faded, first letters…), directions are shown as-is
+const richText = (text, fn = esc) => splitDirs(text).map(seg => seg.dir ? dirHTML(seg.t) : fn(seg.t)).join('');
+
 // Offline version: everything is stored on this device (see local-db.js)
 async function api(path, opts = {}) { return localApi(path, opts); }
 
@@ -268,7 +281,7 @@ const troubleRank = (p) => (p ? (p.trouble ? 10 : 0) + (p.troubleScore || 0) * 3
 // ---------------------------------------------------------------- script helpers
 function myLines(script) {
   const mine = new Set(script.myCharacters);
-  return script.data.entries.filter(e => e.type === 'line' && mine.has(e.speaker));
+  return script.data.entries.filter(e => e.type === 'line' && mine.has(e.speaker) && spokenText(e.text));
 }
 
 function cueFor(script, line) {
@@ -680,7 +693,7 @@ function entryHTML(e, mineSet, editable = false) {
   const cls = `sv-entry ${e.type} ${mine ? 'mine' : ''} ${editable ? 'editable' : ''}`;
   if (e.type === 'scene') return `<div class="${cls}" data-id="${e.id}">${esc(e.text)}</div>`;
   if (e.type === 'dir') return `<div class="${cls}" data-id="${e.id}">${esc(e.text)}</div>`;
-  return `<div class="${cls}" data-id="${e.id}"><div class="who">${esc(e.speaker)}</div>${esc(e.text)}</div>`;
+  return `<div class="${cls}" data-id="${e.id}"><div class="who">${esc(e.speaker)}</div>${richText(e.text)}</div>`;
 }
 
 // ---------------------------------------------------------------- SCRIPT DASHBOARD
@@ -783,7 +796,7 @@ async function renderScript(id, tab = 'scenes') {
     const tl = lines.filter(l => script.progress[l.id] && (script.progress[l.id].trouble || script.progress[l.id].misses)).sort((a, b) => troubleRank(script.progress[b.id]) - troubleRank(script.progress[a.id]));
     el.innerHTML = tl.length ? `<div class="card" style="padding:4px 6px">${tl.map(l => {
       const p = script.progress[l.id]; const { cue } = cueFor(script, l);
-      return `<div class="trouble-item"><div><div class="cue">${cue ? `Cue — ${esc(cue.speaker)}: “${esc(cue.text.slice(-80))}”` : 'Opening line'}</div><div class="txt">${esc(l.text)}</div>
+      return `<div class="trouble-item"><div><div class="cue">${cue ? `Cue — ${esc(cue.speaker)}: “${esc(spokenText(cue.text).slice(-80))}”` : 'Opening line'}</div><div class="txt">${richText(l.text)}</div>
         <div class="small muted">${p.trouble ? '<span class="tag trouble">Trouble</span>' : '<span class="tag done">Fixed</span>'} Missed ${p.misses}× · Shaky ${p.hards}× · ${p.attempts} tries</div></div>
         <button class="btn sm" data-line="${l.id}">Practice</button></div>`;
     }).join('')}</div>` : '<div class="card empty">No trouble spots yet. Any line you miss or find shaky will show up here and come back more often.</div>';
@@ -795,7 +808,7 @@ async function renderScript(id, tab = 'scenes') {
     el.querySelectorAll('[data-line]').forEach(b => b.onclick = () => showLine(script, b.dataset.line));
   } else if (tab === 'script') {
     activeEditor = renderEditor(el, script, {
-      esc, toast, modal, confirmBox, titleCase,
+      esc, toast, modal, confirmBox, titleCase, richText,
       save: async (data, extra) => {
         await api(`/scripts/${script.id}`, { method: 'PUT', body: { data, ...extra } });
         const fresh = await api(`/scripts/${script.id}`);
@@ -868,8 +881,8 @@ function showLine(script, lineId) {
   const l = script.data.entries.find(e => e.id === lineId);
   const p = script.progress[lineId];
   const { cue } = cueFor(script, l);
-  modal.open(`<div class="cue-box"><div class="who">${cue ? esc(cue.speaker) : 'Opening'}</div><div class="cue-text">${cue ? esc(cue.text) : '—'}</div></div>
-    <div class="mine-box" style="margin-top:10px"><div class="who">${esc(l.speaker)}</div><div class="line-text" style="font-size:19px">${esc(l.text)}</div></div>
+  modal.open(`<div class="cue-box"><div class="who">${cue ? esc(cue.speaker) : 'Opening'}</div><div class="cue-text">${cue ? richText(cue.text) : '—'}</div></div>
+    <div class="mine-box" style="margin-top:10px"><div class="who">${esc(l.speaker)}</div><div class="line-text" style="font-size:19px">${richText(l.text)}</div></div>
     <p class="muted small">${p ? `${MASTERY[p.mastery]} · ${p.attempts} tries · missed ${p.misses}× · next review ${p.due <= Date.now() ? 'now' : new Date(p.due).toLocaleDateString()}` : 'Not practiced yet'}</p>
     <div class="row"><span class="spacer"></span><button class="btn" id="l-no">Close</button><button class="btn primary" id="l-go">Practice This Line</button></div>`, (m) => {
     m.querySelector('#l-no').onclick = modal.close;
@@ -929,18 +942,19 @@ function tokenize(text) { return text.split(/(\s+)/).filter(Boolean); }
 
 function fadeHTML(text, frac, seed) {
   const rnd = seeded(seed);
-  return tokenize(text).map(tok => {
+  return richText(text, (seg) => tokenize(seg).map(tok => {
     if (/^\s+$/.test(tok)) return tok;
     const m = tok.match(/^([^\w']*)([\w'’\-]+)([^\w']*)$/);
     if (!m || rnd() >= frac) return esc(tok);
     return `${esc(m[1])}<span class="gap">${esc(m[2])}</span>${esc(m[3])}`;
-  }).join('');
+  }).join(''));
 }
 
 function lettersHTML(text) {
   // Keep the line breaks (song lyrics, poetry) — only shorten each word to its first letter
   const short = (line) => line.split(/\s+/).filter(Boolean).map(w => { const m = w.match(/^([^\w]*)([\w])[\w'’\-]*([^\w]*)$/); return m ? m[1] + m[2] + m[3] : w; }).join(' ');
-  return `<span class="fl">${esc(text.split('\n').map(short).join('\n'))}</span>`;
+  const lead = (seg) => (/^\s/.test(seg) ? ' ' : '') + seg.split('\n').map(short).join('\n') + (/\s$/.test(seg) ? ' ' : '');
+  return richText(text, (seg) => seg.trim() ? `<span class="fl">${esc(lead(seg))}</span>` : esc(seg));
 }
 
 function speak(text, rate = 1, onEnd) {
@@ -1021,7 +1035,7 @@ function drawCard(script) {
   const frac = mode === 'fade' ? ((p?.mastery || 0) >= 3 ? 0.75 : 0.45) : 0;
   const seed = line.id + ':' + (p?.attempts || 0);
   const useVoice = prefs.input === 'speak' && CAN_LISTEN;
-  const scriptWords = line.text.split(/\s+/).filter(Boolean);
+  const scriptWords = spokenText(line.text).split(/\s+/).filter(Boolean);
   const revealed = new Set(); // script word positions given away by hints
   const evalOpts = { speech: useVoice };
 
@@ -1038,7 +1052,7 @@ function drawCard(script) {
         <span class="mode-pill">${MODE_NAMES[mode]}${p?.trouble ? ' · trouble spot' : ''}</span>
         <div class="small muted">${esc(script.data.scenes[line.scene]?.title || '')}</div>
         ${prefs.context && dir ? `<div class="ctx">${esc(dir.text)}</div>` : ''}
-        <div class="cue-box"><div class="who">${cue ? esc(cue.speaker) + (script.myCharacters.includes(cue.speaker) ? ' (you)' : '') : 'Top of scene'} ${cue ? `<button class="speak-btn" id="say-cue" title="Hear cue" aria-label="Hear cue"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button>` : ''}</div><div class="cue-text">${cue ? esc(cue.text) : '<span class="muted">You speak first.</span>'}</div></div>
+        <div class="cue-box"><div class="who">${cue ? esc(cue.speaker) + (script.myCharacters.includes(cue.speaker) ? ' (you)' : '') : 'Top of scene'} ${cue ? `<button class="speak-btn" id="say-cue" title="Hear cue" aria-label="Hear cue"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button>` : ''}</div><div class="cue-text">${cue ? richText(cue.text) : '<span class="muted">You speak first.</span>'}</div></div>
         <div class="mine-box" id="mine"></div>
         <div id="controls"></div>
       </div>
@@ -1055,7 +1069,7 @@ function drawCard(script) {
 
   document.getElementById('quit').onclick = () => { cleanup(); if (Object.keys(s.results).length) drawSummary(script); else location.hash = `#/script/${script.id}`; };
   const sayCue = document.getElementById('say-cue');
-  if (sayCue) sayCue.onclick = () => speak(cue.text);
+  if (sayCue) sayCue.onclick = () => speak(spokenText(cue.text));
   const sw = document.getElementById('switch-input');
   if (sw) sw.onclick = () => {
     if (phase === 'result') return;
@@ -1067,7 +1081,7 @@ function drawCard(script) {
 
   // What's visible while you answer
   const promptHTML = () => {
-    if (gaveUp) return `<div class="line-text">${esc(line.text)}</div>`;
+    if (gaveUp) return `<div class="line-text">${richText(line.text)}</div>`;
     if (revealed.size > 0) {
       // Line skeleton: words you already have, hint words highlighted, blanks for the rest
       const { knownWords } = evaluate(line.text, lastAttempt, evalOpts);
@@ -1076,7 +1090,8 @@ function drawCard(script) {
         : `<span class="blank" style="width:${Math.min(8, Math.max(1.6, w.replace(/[^\w']/g, '').length * 0.55))}em"></span>`;
       // Walk the words in order, keeping line and stanza breaks where they are
       let k = 0;
-      const parts = line.text.split(/(\s+)/).filter(Boolean).map(tok => /^\s+$/.test(tok) ? (tok.includes('\n') ? tok.replace(/[^\n]/g, '') : ' ') : wordHTML(tok, k++));
+      const spokenSeg = (seg) => seg.split(/(\s+)/).filter(Boolean).map(tok => /^\s+$/.test(tok) ? (tok.includes('\n') ? tok.replace(/[^\n]/g, '') : ' ') : wordHTML(tok, k++)).join('');
+      const parts = [richText(line.text, spokenSeg)];
       return `<div class="line-text skeleton">${parts.join('')}</div>${hintNote ? `<div class="small" style="margin-top:6px;color:var(--brand-dark)">${hintNote}</div>` : ''}`;
     }
     if (mode === 'fade') return `<div class="line-text">${fadeHTML(line.text, frac, seed)}</div>`;
@@ -1185,9 +1200,9 @@ function drawCard(script) {
 
   const beginAnswer = (afterCue) => {
     showAnswer();
-    if (!useVoice) { if (afterCue && prefs.speak && cue) speak(cue.text); return; }
+    if (!useVoice) { if (afterCue && prefs.speak && cue) speak(spokenText(cue.text)); return; }
     // Read the cue first (if turned on) so the mic doesn't hear it, then listen
-    if (afterCue && prefs.speak && cue) { document.getElementById('lstatus').textContent = 'Listen to your cue…'; speak(cue.text, 1, () => phase === 'answer' && !listener && controls._start()); }
+    if (afterCue && prefs.speak && cue) { document.getElementById('lstatus').textContent = 'Listen to your cue…'; speak(spokenText(cue.text), 1, () => phase === 'answer' && !listener && controls._start()); }
     else setTimeout(() => phase === 'answer' && !listener && controls._start(), 250);
   };
 
@@ -1217,7 +1232,7 @@ function drawCard(script) {
     const detail = gaveUp ? 'after seeing the line' : [wrongTries ? `${wrongTries + 1} tries` : 'first try', hintClicks ? `${hintClicks} hint${hintClicks === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
     mine.innerHTML = `${who}
       <div class="result-head"><span class="pill g${g}"><i class="fa-solid fa-check" aria-hidden="true"></i> ${G.label}</span><span class="muted small">${detail}</span></div>
-      <div class="line-text">${esc(line.text)}</div>
+      <div class="line-text">${richText(line.text)}</div>
       ${spellNote(attempt)}
       ${g === 2 && mode !== 'recall' && !hintClicks && !wrongTries ? '<div class="small muted" style="margin-top:6px">Some of the line was showing — get it from the cue alone to earn “Nailed it”.</div>' : ''}`;
     controls.innerHTML = `<div class="row"><span class="spacer"></span><span class="muted small" id="auto">Next line…</span><button class="btn primary" id="next">Next →</button></div>`;
@@ -1262,16 +1277,16 @@ function drawCard(script) {
   if (mode === 'learn') {
     phase = 'learn';
     let reps = 0;
-    mine.innerHTML = `${who}<div class="line-text">${esc(line.text)}</div>`;
+    mine.innerHTML = `${who}<div class="line-text">${richText(line.text)}</div>`;
     const drawReps = () => {
       controls.innerHTML = `<div class="row"><div class="reps">${[0, 1, 2].map(i => `<i class="${i < reps ? 'on' : ''}"></i>`).join('')}</div><span class="muted small">Read it aloud with your cue, 3 times</span><span class="spacer"></span>
         <button class="btn ghost sm" id="hear" aria-label="Hear the line"><i class="fa-solid fa-volume-high" aria-hidden="true"></i></button><button class="btn" id="rep">I Said It (${reps}/3)</button><button class="btn primary" id="go">Hide It &amp; Test Me →</button></div>`;
-      document.getElementById('hear').onclick = () => speak(line.text, 0.95);
+      document.getElementById('hear').onclick = () => speak(spokenText(line.text), 0.95);
       document.getElementById('rep').onclick = () => { reps = Math.min(3, reps + 1); drawReps(); };
       document.getElementById('go').onclick = () => beginAnswer(false);
     };
     drawReps();
-    if (prefs.speak && cue) setTimeout(() => speak(cue.text), 250);
+    if (prefs.speak && cue) setTimeout(() => speak(spokenText(cue.text)), 250);
   } else {
     beginAnswer(true);
   }
@@ -1313,7 +1328,7 @@ function drawSummary(script) {
         <p>Script readiness <b>${Math.round(s.startMastery)}% → ${Math.round(after.pct)}%</b>${s.fixed ? ` · fixed <b>${s.fixed}</b> trouble spot${s.fixed === 1 ? '' : 's'}` : ''}</p>
         <div class="mastery-bar" style="max-width:420px;margin:10px auto">${after.counts.map((c, i) => c ? `<span style="width:${(c / after.total) * 100}%;background:var(--m${i})"></span>` : '').join('')}</div>
       </div>
-      ${shaky.length ? `<div class="card" style="margin-top:14px"><h3>Lines to watch</h3><p class="muted small" style="margin-top:0">These are now trouble spots and will come back sooner.</p>${shaky.map(l => `<div class="trouble-item"><div class="txt">${esc(l.text)}</div></div>`).join('')}</div>` : ''}
+      ${shaky.length ? `<div class="card" style="margin-top:14px"><h3>Lines to watch</h3><p class="muted small" style="margin-top:0">These are now trouble spots and will come back sooner.</p>${shaky.map(l => `<div class="trouble-item"><div class="txt">${richText(l.text)}</div></div>`).join('')}</div>` : ''}
       <div class="row" style="justify-content:center;margin-top:18px">
         <a class="btn" href="#/script/${script.id}">Back to Script</a>
         ${shaky.length ? '<button class="btn" id="again-shaky">Drill These Again</button>' : ''}
