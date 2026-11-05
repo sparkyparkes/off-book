@@ -740,7 +740,9 @@ async function renderScript(id, tab = 'scenes') {
           <div class="legend">${MASTERY.map((m, i) => `<span><i style="background:var(--m${i})"></i>${m} ${st.counts[i]}</span>`).join('')}</div>
         </div>
         <div class="row" style="flex-direction:column;align-items:stretch">
-          <button class="btn primary big" id="smart"><i class="fa-solid fa-play" aria-hidden="true"></i> ${st.due ? `Review ${Math.min(st.due, 25)} Lines` : 'Practice'}</button>
+          ${(() => { const d = dailyState(script), t = d.target || dailyTarget(script), left = Math.max(0, t - d.cards); return d.cards && !left
+            ? `<button class="btn big" id="smart"><i class="fa-solid fa-check" aria-hidden="true"></i> Today's Done · Extra Practice</button>`
+            : `<button class="btn primary big" id="smart"><i class="fa-solid fa-play" aria-hidden="true"></i> ${d.cards ? 'Finish' : 'Start'} Today's Practice · ~${minutes(left)} min</button>`; })()}
           <button class="btn ${troubleCount ? '' : 'ghost'}" id="trouble" ${troubleCount ? '' : 'disabled'}><i class="fa-solid fa-bullseye" aria-hidden="true"></i> Drill ${troubleCount} Trouble Spot${troubleCount === 1 ? '' : 's'}</button>
         </div>
       </div>
@@ -778,7 +780,7 @@ async function renderScript(id, tab = 'scenes') {
   document.querySelectorAll('#inputs .mode').forEach(b => b.onclick = () => { if (b.disabled) return; prefs.input = b.dataset.i; savePrefs(); document.querySelectorAll('#inputs .mode').forEach(x => x.classList.toggle('on', x === b)); });
   document.getElementById('speak').onchange = (e) => { prefs.speak = e.target.checked; savePrefs(); };
   document.getElementById('context').onchange = (e) => { prefs.context = e.target.checked; savePrefs(); };
-  document.getElementById('smart').onclick = () => startSession(script, { kind: 'smart' });
+  document.getElementById('smart').onclick = () => { const d = dailyState(script); startSession(script, d.target && d.cards >= d.target ? { kind: 'smart', cards: 10 } : { kind: 'smart' }); };
   document.getElementById('trouble').onclick = () => startSession(script, { kind: 'trouble' });
   document.getElementById('roles').onclick = () => editRoles(script);
   bindPlanCard(script, id, tab);
@@ -918,20 +920,70 @@ function planFor(script) {
   const nextUp = lines.find(l => !isLearned(P[l.id])) || null;
   return { set, pace, learned, learnedToday, nextUp, total: lines.length };
 }
-// How many new (never learned) lines to add to a Smart Review today
-function newLineBudget(script) {
+// New (never learned) lines for today: min = what your plan needs; max = the most allowed.
+// With an off-book date, the plan's number is a minimum — if there's time left in the session you get ahead.
+function newLinePlan(script) {
   const { set, pace } = planFor(script);
-  if (set.reviewOnly) return 0;
-  if (set.newPerSession) return set.newPerSession;
-  if (pace) return pace.status === 'done' ? 0 : Math.min(10, pace.todayRemaining);
-  return null; // no plan: use the default
+  if (set.reviewOnly) return { min: 0, max: 0 };
+  if (set.newPerSession) return { min: set.newPerSession, max: set.newPerSession };
+  if (pace) return pace.status === 'done' ? { min: 0, max: 0 } : { min: Math.min(10, pace.todayRemaining), max: Infinity };
+  return { min: 0, max: Infinity };
 }
+// ---- Today's practice: a short daily session (about 5–10 minutes), longer only when you're behind
+const CARD_SECONDS = 20;           // rough time per card
+const BASE_CARDS = 24;             // ≈ 8 minutes
+const MAX_CARDS = 45;              // ≈ 15 minutes, only when well behind your off-book date
+const todayKeyLocal = () => todayKey();
+function dailyState(script) {
+  const d = script.progress._daily;
+  return d && d.date === todayKeyLocal() ? d : { date: todayKeyLocal(), cards: 0, target: null, lastSeen: 0 };
+}
+// Today's target in cards — fixed once set, so it doesn't move between sessions on the same day
+function dailyTarget(script) {
+  const d = dailyState(script);
+  if (d.target) return d.target;
+  const { pace, set } = planFor(script);
+  let target = BASE_CARDS;
+  if (pace && pace.status !== 'done' && !set.reviewOnly && !set.newPerSession) {
+    // Behind schedule (more than ~4 new lines needed a day): allow a longer session
+    const extraNew = Math.max(0, pace.todayRemaining - 4);
+    target = Math.min(MAX_CARDS, BASE_CARDS + extraNew * 4);
+  }
+  // Nothing much to do? Don't invent work: cap at what's actually waiting
+  const available = estimateAvailableCards(script);
+  return Math.max(4, Math.min(target, Math.ceil(available)));
+}
+function bumpDaily(script, n = 1) {
+  const d = { ...dailyState(script) };
+  if (!d.target) d.target = session?.cardTarget || dailyTarget(script);
+  d.cards += n; d.lastSeen = Date.now();
+  script.progress._daily = d;
+  return d;
+}
+const minutes = (cards) => Math.max(1, Math.round(cards * CARD_SECONDS / 60));
+// Rough number of cards a line takes today
+function cardCost(script, l) {
+  const p = script.progress[l.id];
+  if (prefs.mode !== 'auto' || isLearned(p)) return 1.3;
+  const chunks = chunksFor(l).length;
+  if (chunks) return chunks * 4 + 2;
+  return Math.max(1, 4 - startStep(p)) + 0.2;
+}
+function estimateAvailableCards(script) {
+  const lines = myLines(script), P = script.progress, now = Date.now();
+  const due = lines.filter(l => P[l.id] && P[l.id].attempts && P[l.id].due <= now);
+  const { max } = newLinePlan(script);
+  const fresh = lines.filter(l => !isLearned(P[l.id]) && !due.includes(l)).slice(0, Math.min(max, 1000));
+  const older = lines.filter(l => isLearned(P[l.id]) && P[l.id].due > now).length;
+  return [...due, ...fresh].reduce((a, l) => a + cardCost(script, l), 0) + Math.min(2, older);
+}
+
 // Long speeches and songs are learned in chunks, then linked back together
 const chunkCache = new WeakMap();
 const chunksFor = (line) => { if (!chunkCache.has(line)) chunkCache.set(line, chunkLine(line.text)); return chunkCache.get(line); };
 
 function buildQueue(script, cfg) {
-  const lines = myLines(script);
+  const lines = myLines(script).filter(l => !cfg.exclude?.has(l.id));
   const P = script.progress;
   const now = Date.now();
   let q, extras = [];
@@ -943,22 +995,39 @@ function buildQueue(script, cfg) {
     // Smart review: trouble first, then overdue reviews, then a few new lines in script order (never skipping ahead)
     const due = lines.filter(l => P[l.id] && P[l.id].attempts && P[l.id].due <= now).sort((a, b) => troubleRank(P[b.id]) - troubleRank(P[a.id]) || P[a.id].due - P[b.id].due);
     const fresh = lines.filter(l => !isLearned(P[l.id]) && !due.includes(l));
-    const picked = [...due.slice(0, 15)];
-    const budget = newLineBudget(script);
-    // Count new material in chunks: a long speech counts as several pieces
-    let room = budget ?? (prefs.mode === 'auto' ? (picked.length ? 4 : 6) : Math.max(5, 25 - picked.length));
+    const { min: needNew, max: maxNew } = newLinePlan(script);
+    // Fit today's session into its card budget (about 5–10 minutes)
+    const cardsLeft = cfg.cards ?? Math.max(0, dailyTarget(script) - dailyState(script).cards);
+    const newCost = (n) => fresh.slice(0, n).reduce((a, l) => a + cardCost(script, l), 0);
+    // Reviews come first, but leave room for the new lines your plan needs today (up to 60% of the session)
+    let reserveLines = needNew;
+    while (reserveLines > 0 && newCost(reserveLines) > cardsLeft * 0.6) reserveLines--;
+    if (needNew > 0 && reserveLines === 0 && fresh.length) reserveLines = 1;
+    const picked = [];
+    let used = 0;
+    const reviewRoom = Math.max(0, cardsLeft - newCost(reserveLines));
+    for (const l of due) {
+      const c = cardCost(script, l);
+      if (picked.length && used + c > reviewRoom) break;
+      picked.push(l); used += c;
+    }
+    // Then new lines in script order: at least what your plan needs, more if there's time left today
+    let added = 0;
     for (const l of fresh) {
-      if (room <= 0) break;
-      picked.push(l);
-      room -= prefs.mode === 'auto' ? Math.max(1, chunksFor(l).length) : 1;
+      if (added >= maxNew) break;
+      const c = cardCost(script, l);
+      const required = added < reserveLines;
+      if (!required && used + c > cardsLeft + 1) break;
+      picked.push(l); used += c; added++;
     }
     // Mixed review: a couple of older learned lines that aren't due yet, so earlier scenes don't fade
     if (prefs.mode === 'auto') {
+      const room = cardsLeft - used;
       const older = lines.filter(l => isLearned(P[l.id]) && !picked.includes(l) && P[l.id].due > now)
-        .sort((a, b) => (P[a.id].lastSeen || 0) - (P[b.id].lastSeen || 0)).slice(0, picked.length >= 12 ? 1 : 2);
+        .sort((a, b) => (P[a.id].lastSeen || 0) - (P[b.id].lastSeen || 0)).slice(0, room >= 4 ? 2 : room >= 2 ? 1 : 0);
       extras = older.map((l, i) => ({ line: l, requeued: 0, variety: i % 2 === 0 ? 'spot' : 'review' }));
     }
-    if (!picked.length && !extras.length) picked.push(...lines.slice().sort((a, b) => (P[a.id]?.due || 0) - (P[b.id]?.due || 0)).slice(0, 15));
+    if (!picked.length && !extras.length) picked.push(...lines.slice().sort((a, b) => (P[a.id]?.due || 0) - (P[b.id]?.due || 0)).slice(0, Math.max(3, Math.round((cfg.cards ?? BASE_CARDS) / 1.5))));
     const order = new Map(lines.map((l, i) => [l.id, i]));
     q = picked.slice(0, 25).sort((a, b) => order.get(a.id) - order.get(b.id));
   }
@@ -995,7 +1064,13 @@ function startSession(script, cfg) {
     return;
   }
   const labels = { smart: 'Smart review', trouble: 'Trouble spots', all: 'Full run-through', lines: 'Line drill', scene: script.data.scenes[cfg.scene]?.title || 'Scene' };
-  session = { scriptId: script.id, cfg, label: (cfg.pickups ? 'Pickups · ' : '') + labels[cfg.kind], queue, i: 0, unique: new Set(queue.map(q => q.line.id)).size, results: {}, combo: 0, bestCombo: 0, xp: 0, misses: 0, startMastery: stats(script).pct, fixed: 0, forceMode: cfg.pickups ? 'recall' : null, words: [], learnedNow: 0 };
+  const daily = cfg.kind === 'smart';
+  const dayTarget = daily ? (cfg.cards ? null : dailyTarget(script)) : null;
+  const doneToday = dailyState(script).cards;
+  // Stop a little after the budget runs out so lines mid-ladder can finish, but never let it run on and on
+  const budgetCards = daily ? (cfg.cards ?? Math.max(4, dayTarget - doneToday)) : null;
+  session = { cardTarget: dayTarget || dailyState(script).target || BASE_CARDS, cards: 0, cardLimit: budgetCards ? Math.ceil(budgetCards * 1.25) + 2 : null, daily, extra: !!cfg.cards,
+    scriptId: script.id, cfg, label: (cfg.pickups ? 'Pickups · ' : '') + (cfg.cards ? 'Extra practice' : labels[cfg.kind] === 'Smart review' ? "Today's practice" : labels[cfg.kind]), queue, i: 0, unique: new Set(queue.map(q => q.line.id)).size, results: {}, combo: 0, bestCombo: 0, xp: 0, misses: 0, startMastery: stats(script).pct, fixed: 0, forceMode: cfg.pickups ? 'recall' : null, words: [], learnedNow: 0 };
   const target = `#/practice/${script.id}`;
   if (location.hash === target) router(); else location.hash = target;
 }
@@ -1149,8 +1224,62 @@ function scaffoldUpdate(prev, g, mastery) {
   return p;
 }
 
+// One more card answered: counts toward today's practice, celebrates when today's target is reached
+function countCard(script) {
+  const s = session;
+  if (!s) return;
+  s.cards++;
+  if (!s.daily) return;
+  const before = dailyState(script).cards;
+  const d = bumpDaily(script);
+  if (before < d.target && d.cards >= d.target && !s.extra) {
+    s.dailyDone = true;
+    toast("Today's practice is done!", 'Finish this line and you\'re free. Extra practice is optional.', '<i class="fa-solid fa-flag-checkered" aria-hidden="true"></i>');
+    confetti(80);
+  }
+  updateDailyBar(script);
+}
+function dailyBarHTML(script) {
+  const s = session;
+  if (!s?.daily) return null;
+  const d = dailyState(script);
+  if (s.extra) {
+    const pct = Math.min(100, (s.cards / Math.max(1, s.cfg.cards)) * 100);
+    return { pct, label: `Extra practice · ${Math.min(s.cards, s.cfg.cards)}/${s.cfg.cards}` };
+  }
+  const target = d.target || s.cardTarget;
+  const pct = Math.min(100, (d.cards / target) * 100);
+  const left = Math.max(0, target - d.cards);
+  return { pct, label: left ? `Today ${d.cards}/${target} · ~${minutes(left)} min left` : `Today ✓ done` };
+}
+function updateDailyBar(script) {
+  const b = dailyBarHTML(script);
+  if (!b) return;
+  const bar = document.querySelector('.p-top .progress-line span'), lab = document.querySelector('.p-top .p-count');
+  if (bar) bar.style.width = b.pct + '%';
+  if (lab) lab.textContent = b.label;
+}
+
 function drawCard(script) {
   const s = session;
+  // Today's session is over once its budget is used up (lines mid-way pick up tomorrow)
+  if (s.cardLimit && s.cards >= s.cardLimit) return drawSummary(script);
+  // Today's target reached: finish the lines already in progress, but don't start anything new
+  if (s.daily && !s.extra && s.dailyDone) {
+    while (s.i < s.queue.length && s.queue[s.i].requeued === 0 && !s.ladder?.[s.queue[s.i].unit?.id || s.queue[s.i].line.id]) s.i++;
+  }
+  if (s.i >= s.queue.length && s.daily && !s.toppedUp) {
+    // Finished the planned cards a bit early: top up so today's practice reaches its target in one go
+    const left = s.extra ? s.cfg.cards - s.cards : (dailyState(script).target || s.cardTarget) - dailyState(script).cards;
+    if (left >= 2) {
+      s.toppedUp = (s.toppedUp || 0) + 1;
+      const more = buildQueue(script, { kind: 'smart', cards: left, exclude: new Set(s.queue.map(q => q.line.id)) });
+      if (more.length) { s.queue.push(...more); s.unique += new Set(more.map(q => q.line.id)).size; if (s.toppedUp < 3) s.toppedUp = false; }
+    } else if (left > 0 && !s.extra) {
+      // Within a card of the target: call today done rather than asking for one more minute
+      const d = { ...dailyState(script) }; d.target = d.cards; script.progress._daily = d; saveProgress(script);
+    }
+  }
   if (s.i >= s.queue.length) return drawSummary(script);
   const item = s.queue[s.i];
   const line = item.line;
@@ -1187,8 +1316,8 @@ function drawCard(script) {
     <div class="practice">
       <div class="p-top">
         <button class="btn ghost sm" id="quit" title="End session" aria-label="End session"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
-        <div class="progress-line"><span style="width:${(done / s.unique) * 100}%"></span></div>
-        <span class="small muted">${done}/${s.unique}</span>
+        <div class="progress-line ${s.daily ? 'daily' : ''}"><span style="width:${dailyBarHTML(script)?.pct ?? (done / s.unique) * 100}%"></span></div>
+        <span class="small muted p-count">${dailyBarHTML(script)?.label ?? `${done}/${s.unique}`}</span>
         <span class="combo" id="combo">${s.combo >= 2 ? `<i class="fa-solid fa-fire" aria-hidden="true"></i> ${s.combo}×` : ''}</span>
         ${CAN_LISTEN ? `<button class="btn sm input-switch" id="switch-input" title="Change how you answer" aria-label="${useVoice ? 'Switch to typing' : 'Switch to speaking'}">${useVoice ? '<i class="fa-regular fa-keyboard" aria-hidden="true"></i><span class="sw-label"> Switch to Typing</span>' : '<i class="fa-solid fa-microphone" aria-hidden="true"></i><span class="sw-label"> Switch to Speaking</span>'}</button>` : ''}
       </div>
@@ -1482,6 +1611,7 @@ function drawCard(script) {
         }
       }
     }
+    countCard(script);
     // Hints used and words you got wrong, for the Trouble Spots page
     if (hintClicks) script.progress[key].hints = (prev?.hints || 0) + hintClicks;
     if (pendingWords.length) {
@@ -1616,7 +1746,7 @@ function drawSpot(script, item) {
   const done = Object.keys(s.results).length;
   $app.innerHTML = `
     <div class="practice">
-      <div class="p-top"><button class="btn ghost sm" id="quit" aria-label="End session"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button><div class="progress-line"><span style="width:${(done / s.unique) * 100}%"></span></div><span class="small muted">${done}/${s.unique}</span><span class="combo"></span></div>
+      <div class="p-top"><button class="btn ghost sm" id="quit" aria-label="End session"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button><div class="progress-line ${s.daily ? 'daily' : ''}"><span style="width:${dailyBarHTML(script)?.pct ?? (done / s.unique) * 100}%"></span></div><span class="small muted p-count">${dailyBarHTML(script)?.label ?? `${done}/${s.unique}`}</span><span class="combo"></span></div>
       <div class="stage">
         <span class="mode-pill">Spot the Error · quick review</span>
         <div class="small muted">${esc(script.data.scenes[line.scene]?.title || '')}</div>
@@ -1643,6 +1773,7 @@ function drawSpot(script, item) {
     // Recognition is easier than recall: a miss brings the line's next real review forward, a hit doesn't change its schedule
     if (g === 0 && script.progress[line.id]) { script.progress[line.id].due = Date.now(); saveProgress(script); }
     s.results[line.id] = Math.min(g, s.results[line.id] ?? 3);
+    countCard(script); saveProgress(script);
     const xp = G.xp; s.xp += xp; addXP(xp, document.getElementById('next'));
     recordReview();
     advance = setTimeout(next, g ? 2600 : 4000);
@@ -1747,11 +1878,12 @@ function drawSummary(script) {
   }
   saveProgress.flush(script); saveProfile.flush();
   const shaky = ids.filter(id => s.results[id] <= 1).map(id => script.data.entries.find(e => e.id === id)).filter(Boolean);
-  const headline = clean >= 0.9 ? 'Bravo!' : clean >= 0.7 ? 'Strong rehearsal' : clean >= 0.4 ? 'Good work — it\'s sinking in' : 'Every rep counts';
+  const dd = dailyState(script), dailyComplete = s.daily && dd.target && dd.cards >= dd.target;
+  const headline = s.daily && !s.extra && dailyComplete ? "Today's practice is done" : clean >= 0.9 ? 'Bravo!' : clean >= 0.7 ? 'Strong rehearsal' : clean >= 0.4 ? 'Good work — it\'s sinking in' : 'Every rep counts';
   $app.innerHTML = `
     <div class="practice">
       <div class="card summary">
-        <div class="muted small">${esc(s.label)} complete</div>
+        <div class="muted small">${esc(s.label)}${s.daily && !s.extra && !dailyComplete ? ` · ${dd.cards} of ${dd.target} cards today` : ' complete'}</div>
         <div class="big">${headline}</div>
         <div class="sum-stats">
           <div class="stat"><b>${ids.length}</b><span>lines practiced</span></div>
@@ -1767,13 +1899,16 @@ function drawSummary(script) {
       <div class="row" style="justify-content:center;margin-top:18px">
         <a class="btn" href="#/script/${script.id}">Back to Script</a>
         ${shaky.length ? '<button class="btn" id="again-shaky">Drill These Again</button>' : ''}
-        <button class="btn primary" id="again">Keep Going <i class="fa-solid fa-play" aria-hidden="true"></i></button>
+        ${s.daily && dailyComplete
+          ? '<button class="btn" id="again">Extra Practice (~3 min)</button><a class="btn primary" href="#/">Done for Today</a>'
+          : `<button class="btn primary" id="again">${s.daily ? `Finish Today's Practice (~${minutes(Math.max(1, (dd.target || 0) - dd.cards))} min)` : 'Keep Going'} <i class="fa-solid fa-play" aria-hidden="true"></i></button>`}
       </div>
-      <div class="tip" style="margin-top:20px">Tip: short sessions spread through the day work better than one long cram. Try another round tonight — sleep helps lock lines in.</div>
+      <div class="tip" style="margin-top:20px">${dailyComplete ? 'That\'s it for today. Short daily practice beats long cramming, and sleep helps lock lines in — come back tomorrow.' : 'Tip: short sessions spread through the day work better than one long cram. Sleep helps lock lines in.'}</div>
     </div>`;
   const cfg = s.cfg;
   session = null;
-  document.getElementById('again').onclick = () => startSession(script, cfg.kind === 'lines' ? { kind: 'smart' } : cfg);
+  document.getElementById('again').onclick = () => startSession(script, cfg.kind === 'lines' ? { kind: 'smart' }
+    : cfg.kind === 'smart' ? (dailyComplete ? { kind: 'smart', cards: 10 } : { kind: 'smart' }) : cfg);
   const as = document.getElementById('again-shaky'); if (as) as.onclick = () => startSession(script, { kind: 'lines', ids: shaky.map(l => l.id) });
 }
 

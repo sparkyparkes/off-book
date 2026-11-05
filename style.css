@@ -383,3 +383,7 @@ code { background: var(--bg); border-radius: 4px; padding: 1px 5px; font-size: 1
 .order-card .order-text { white-space: pre-line; font-size: 15px; }
 .order-card.right { border: 2px solid var(--success); }
 .order-card.wrong { border: 2px solid var(--danger); background: var(--danger-soft); }
+/* Today's practice bar */
+.p-top .progress-line.daily span { background: linear-gradient(90deg, var(--brand), var(--green-300)); }
+.p-count { white-space: nowrap; }
+@media (max-width: 560px) { .p-count { font-size: 11px; } }

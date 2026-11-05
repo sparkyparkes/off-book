@@ -1,7 +1,7 @@
 // Off Book offline service worker: saves every file the app needs on the device on first visit,
 // then serves them from the device, so the app opens and runs with no internet.
 // When you publish an update, change VERSION so devices pick up the new files.
-const VERSION = 'off-book-v10';
+const VERSION = 'off-book-v11';
 const FILES = [
   './',
   './app.js',
